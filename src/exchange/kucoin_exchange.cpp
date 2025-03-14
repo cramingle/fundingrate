@@ -107,12 +107,12 @@ KuCoinExchange::KuCoinExchange(const ExchangeConfig& config) :
     api_key_(config.getApiKey()),
     api_secret_(config.getApiSecret()),
     passphrase_(config.getParam("passphrase")),
-    base_url_("https://api.kucoin.com"),  // Updated base URL
+    base_url_("https://api.kucoin.com"),
     use_testnet_(config.getUseTestnet()),
-    last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) {
+    last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
     
     if (use_testnet_) {
-        base_url_ = "https://api-sandbox.kucoin.com";
+        base_url_ = "https://openapi-sandbox.kucoin.com";
     }
     
     // Initialize CURL
@@ -140,12 +140,11 @@ std::string KuCoinExchange::getBaseUrl() const {
 // Utility methods
 bool KuCoinExchange::isConnected() {
     try {
-        // Make a simple API call to test connectivity
+        // Simple server time endpoint to check connection
         std::string endpoint = "/api/v1/timestamp";
         json response = makeApiCall(endpoint, "", false);
         
-        // Check if the response contains the expected code
-        return (response.contains("code") && response["code"] == "200000");
+        return (response["code"] == "200000");
     } catch (const std::exception& e) {
         std::cerr << "KuCoin connection check failed: " << e.what() << std::endl;
         return false;
@@ -659,8 +658,18 @@ std::vector<Instrument> KuCoinExchange::getAvailableInstruments(MarketType type)
 
 double KuCoinExchange::getPrice(const std::string& symbol) {
     try {
+        // Convert symbol format from BTCUSDT to BTC-USDT
+        std::string kucoin_symbol = symbol;
+        if (symbol.find("-") == std::string::npos) {
+            // If the symbol doesn't contain a hyphen, try to insert one
+            size_t pos = symbol.find("USDT");
+            if (pos != std::string::npos) {
+                kucoin_symbol = symbol.substr(0, pos) + "-" + symbol.substr(pos);
+            }
+        }
+        
         // Endpoint for getting ticker information
-        std::string endpoint = "/api/v1/market/orderbook/level1?symbol=" + symbol;
+        std::string endpoint = "/api/v1/market/orderbook/level1?symbol=" + kucoin_symbol;
         
         // Make API call
         json response = makeApiCall(endpoint);
@@ -685,7 +694,7 @@ double KuCoinExchange::getPrice(const std::string& symbol) {
         }
     } catch (const std::exception& e) {
         std::cerr << "Error in KuCoinExchange::getPrice: " << e.what() << std::endl;
-        return 0.0; // Return 0 on error
+        return 0.0;
     }
 }
 
@@ -782,8 +791,18 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
     rate.symbol = symbol;
     
     try {
+        // Convert symbol format for KuCoin futures
+        // KuCoin uses formats like XBTUSDM for BTC, ETHUSDM for ETH
+        std::string kucoin_symbol = symbol;
+        if (symbol == "BTCUSDT") {
+            kucoin_symbol = "XBTUSDM";
+        } else if (symbol.find("USDT") != std::string::npos) {
+            // For other symbols, replace USDT with USDM
+            kucoin_symbol = symbol.substr(0, symbol.find("USDT")) + "USDM";
+        }
+        
         // KuCoin funding rate endpoint for futures
-        std::string endpoint = "/api/v1/contract/funding-rate/" + symbol;
+        std::string endpoint = "/api/v1/contract/funding-rate/" + kucoin_symbol;
         
         // Make API call
         json response = makeApiCall(endpoint);

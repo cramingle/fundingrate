@@ -36,14 +36,12 @@ public:
         api_key_(config.getApiKey()),
         api_secret_(config.getApiSecret()),
         passphrase_(config.getParam("passphrase")),
-        base_url_("https://api.okx.com"),
+        base_url_("https://www.okx.com"),
         use_testnet_(config.getUseTestnet()),
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
-            base_url_ = "https://api.okx.com/api/v5/demo";
-        } else {
-            base_url_ = "https://api.okx.com/api/v5";
+            base_url_ = "https://www.okx.com";
         }
         
         // Initialize CURL
@@ -495,11 +493,11 @@ public:
     
     bool isConnected() override {
         try {
-            // Simple ping endpoint to check connection
-            std::string endpoint = "/public/time";
+            // Simple server time endpoint to check connection
+            std::string endpoint = "/api/v5/public/time";
             json response = makeApiCall(endpoint, "", false);
             
-            return response.contains("code") && response["code"] == "0";
+            return (response["code"] == "0");
         } catch (const std::exception& e) {
             std::cerr << "OKX connection check failed: " << e.what() << std::endl;
             return false;
