@@ -1,0 +1,92 @@
+{
+  "bot_name": "FundingRateArbitrage",
+  "simulation_mode": false,
+  "log_level": 2,
+  "log_file": "logs/bot.log",
+  
+  "exchanges": {
+    "binance": {
+      "api_key": "YOUR_BINANCE_API_KEY",
+      "api_secret": "YOUR_BINANCE_API_SECRET",
+      "base_url": "https://api.binance.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    },
+    "bybit": {
+      "api_key": "YOUR_BYBIT_API_KEY",
+      "api_secret": "YOUR_BYBIT_API_SECRET",
+      "base_url": "https://api.bybit.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    },
+    "okx": {
+      "api_key": "YOUR_OKX_API_KEY",
+      "api_secret": "YOUR_OKX_API_SECRET",
+      "passphrase": "YOUR_OKX_PASSPHRASE",
+      "base_url": "https://www.okx.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    },
+    "deribit": {
+      "api_key": "YOUR_DERIBIT_API_KEY",
+      "api_secret": "YOUR_DERIBIT_API_SECRET",
+      "base_url": "https://www.deribit.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    },
+    "bitget": {
+      "api_key": "YOUR_BITGET_API_KEY",
+      "api_secret": "YOUR_BITGET_API_SECRET",
+      "passphrase": "YOUR_BITGET_PASSPHRASE",
+      "base_url": "https://api.bitget.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    },
+    "kucoin": {
+      "api_key": "YOUR_KUCOIN_API_KEY",
+      "api_secret": "YOUR_KUCOIN_API_SECRET",
+      "passphrase": "YOUR_KUCOIN_PASSPHRASE",
+      "base_url": "https://api.kucoin.com",
+      "use_testnet": false,
+      "connect_timeout_ms": 5000,
+      "request_timeout_ms": 30000
+    }
+  },
+  
+  "strategies": [
+    {
+      "type": "SAME_EXCHANGE_SPOT_PERP",
+      "min_funding_rate": 0.0001,
+      "min_expected_profit": 5.0,
+      "scan_interval_seconds": 300
+    },
+    {
+      "type": "CROSS_EXCHANGE_PERP_PERP",
+      "min_funding_rate": 0.0002,
+      "min_expected_profit": 8.0,
+      "scan_interval_seconds": 60
+    },
+    {
+      "type": "CROSS_EXCHANGE_SPOT_PERP",
+      "min_funding_rate": 0.0003,
+      "min_expected_profit": 10.0,
+      "scan_interval_seconds": 600
+    }
+  ],
+  
+  "risk_config": {
+    "max_position_size_usd": 5000.0,
+    "max_total_position_usd": 50000.0,
+    "max_position_per_exchange": 0.3,
+    "max_price_divergence_pct": 0.5,
+    "target_profit_pct": 1.0,
+    "stop_loss_pct": 1.0,
+    "dynamic_position_sizing": true,
+    "min_liquidity_depth": 50000.0
+  }
+}
