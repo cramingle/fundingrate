@@ -358,7 +358,12 @@ public:
                 
                 // Parse current funding rate
                 if (data.contains("fundingRate")) {
-                    funding.rate = std::stod(data["fundingRate"].get<std::string>());
+                    std::string rate_str = data["fundingRate"].get<std::string>();
+                    funding.rate = std::stod(rate_str);
+                    std::cout << "Parsed funding rate for " << modified_symbol << ": " << funding.rate << std::endl;
+                } else {
+                    funding.rate = 0.0;
+                    std::cout << "No funding rate found for " << modified_symbol << ", using default 0.0" << std::endl;
                 }
                 
                 // Parse next funding time
@@ -366,6 +371,9 @@ public:
                     std::string next_time_str = data["nextFundingTime"].get<std::string>();
                     int64_t next_time = std::stoll(next_time_str);
                     funding.next_payment = std::chrono::system_clock::from_time_t(next_time / 1000);
+                } else {
+                    // Default to 8 hours from now
+                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
                 }
                 
                 // Parse predicted rate if available
@@ -378,6 +386,14 @@ public:
                 
                 // Bitget has 8-hour funding intervals
                 funding.payment_interval = std::chrono::hours(8);
+            } else {
+                std::string error_msg = "Failed to get funding rate: ";
+                if (response.contains("msg")) {
+                    error_msg += response["msg"].get<std::string>();
+                } else {
+                    error_msg += "Unknown error";
+                }
+                throw std::runtime_error(error_msg);
             }
         } catch (const std::exception& e) {
             std::cerr << "Error fetching funding rate from Bitget: " << e.what() << std::endl;
@@ -1124,6 +1140,10 @@ private:
         if (method != "GET" && !request_body.empty()) {
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_body.c_str());
         }
+        
+        // Set timeout
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
         
         // Perform request
         CURLcode result = curl_easy_perform(curl);
