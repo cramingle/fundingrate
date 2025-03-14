@@ -7,6 +7,7 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <set>
 
 namespace funding {
 
@@ -15,6 +16,31 @@ SameExchangeSpotPerpStrategy::SameExchangeSpotPerpStrategy(std::shared_ptr<Excha
     std::stringstream ss;
     ss << "Initialized with exchange: " << exchange_->getName();
     std::cout << ss.str() << std::endl;
+}
+
+std::set<std::string> SameExchangeSpotPerpStrategy::getSymbols() const {
+    std::set<std::string> symbols;
+    
+    try {
+        // Get all available perpetual futures
+        auto perp_instruments = exchange_->getAvailableInstruments(MarketType::PERPETUAL);
+        
+        // Get all available spot instruments
+        auto spot_instruments = exchange_->getAvailableInstruments(MarketType::SPOT);
+        
+        // Add all symbols to the set
+        for (const auto& perp : perp_instruments) {
+            symbols.insert(perp.symbol);
+        }
+        
+        for (const auto& spot : spot_instruments) {
+            symbols.insert(spot.symbol);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error in SameExchangeSpotPerpStrategy::getSymbols: " << e.what() << std::endl;
+    }
+    
+    return symbols;
 }
 
 std::vector<ArbitrageOpportunity> SameExchangeSpotPerpStrategy::findOpportunities() {

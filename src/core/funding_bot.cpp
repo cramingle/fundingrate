@@ -131,7 +131,7 @@ FundingBot::~FundingBot() {
         disconnectExchanges();
         
         // Save final performance stats
-        savePerformanceStats();
+        saveState();
         
     } catch (const std::exception& e) {
         log("Error in FundingBot destructor: " + std::string(e.what()), true);
@@ -165,6 +165,9 @@ bool FundingBot::initialize() {
         // Load strategies
         loadStrategies();
         
+        // Set up WebSocket client
+        setupWebSocketClient();
+        
         // Load any saved state (positions, performance, etc.)
         loadSavedState();
         
@@ -194,6 +197,9 @@ bool FundingBot::start() {
         
         // Start monitoring thread
         monitor_thread_ = std::thread(&FundingBot::monitorLoop, this);
+        
+        // Start WebSocket thread
+        websocket_thread_ = std::thread(&FundingBot::websocketLoop, this);
         
         log("FundingBot started successfully");
         return true;
@@ -227,6 +233,10 @@ bool FundingBot::stop() {
         
         if (monitor_thread_.joinable()) {
             monitor_thread_.join();
+        }
+        
+        if (websocket_thread_.joinable()) {
+            websocket_thread_.join();
         }
         
         // Save state before stopping
@@ -1119,6 +1129,129 @@ void FundingBot::addDailyReturn(double return_value) {
     // Keep only the last year of daily returns (252 trading days)
     if (performance_.daily_returns.size() > 252) {
         performance_.daily_returns.erase(performance_.daily_returns.begin());
+    }
+}
+
+// WebSocket loop
+void FundingBot::websocketLoop() {
+    log("WebSocket loop started");
+    
+    while (running_) {
+        try {
+            if (websocket_client_ && websocket_client_->isConnected()) {
+                // Service the WebSocket connection
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            } else {
+                // Attempt to reconnect if disconnected
+                setupWebSocketClient();
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+            }
+            
+            // Use condition variable with timeout to allow for early wakeup
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::seconds(1), [this]() { return !running_; });
+            
+        } catch (const std::exception& e) {
+            log("Error in WebSocket loop: " + std::string(e.what()), true);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    }
+    
+    log("WebSocket loop stopped");
+}
+
+// Set up WebSocket client
+void FundingBot::setupWebSocketClient() {
+    try {
+        // Create WebSocket client with Binance stream URL
+        std::vector<std::string> streams;
+        websocket_client_ = std::make_unique<WebSocketClient>(
+            "wss://stream.binance.com:9443/stream", streams);
+        
+        // Set message callback
+        websocket_client_->setMessageCallback(
+            std::bind(&FundingBot::onPriceUpdate, this, std::placeholders::_1, std::placeholders::_2));
+        
+        // Connect to WebSocket server
+        if (!websocket_client_->connect("wss://stream.binance.com:9443/stream")) {
+            throw std::runtime_error("Failed to connect to WebSocket server");
+        }
+        
+        // Subscribe to symbols
+        subscribeToSymbols();
+        
+        log("WebSocket client initialized successfully");
+    } catch (const std::exception& e) {
+        log("Error setting up WebSocket client: " + std::string(e.what()), true);
+        websocket_client_.reset();
+    }
+}
+
+// Subscribe to symbols
+void FundingBot::subscribeToSymbols() {
+    try {
+        if (!websocket_client_) return;
+        
+        // Get all symbols from strategies
+        std::set<std::string> symbols;
+        for (const auto& strategy : strategies_) {
+            const auto& strategy_symbols = strategy->getSymbols();
+            symbols.insert(strategy_symbols.begin(), strategy_symbols.end());
+        }
+        
+        // Convert symbols to Binance stream format
+        std::vector<std::string> streams;
+        for (const auto& symbol : symbols) {
+            // Convert to lowercase and add @ticker suffix
+            std::string stream = symbol;
+            std::transform(stream.begin(), stream.end(), stream.begin(), ::tolower);
+            streams.push_back(stream + "@ticker");
+        }
+        
+        // Update WebSocket client streams
+        websocket_client_ = std::make_unique<WebSocketClient>(
+            "wss://stream.binance.com:9443/stream", streams);
+        
+        log("Subscribed to " + std::to_string(streams.size()) + " symbol streams");
+    } catch (const std::exception& e) {
+        log("Error subscribing to symbols: " + std::string(e.what()), true);
+    }
+}
+
+// WebSocket price update callback
+void FundingBot::onPriceUpdate(const std::string& symbol, double price) {
+    try {
+        std::lock_guard<std::mutex> lock(price_mutex_);
+        latest_prices_[symbol] = price;
+        
+        // Log price update
+        std::stringstream ss;
+        ss << "Price update for " << symbol << ": " << price;
+        log(ss.str(), false, false); // Don't spam console with price updates
+    } catch (const std::exception& e) {
+        log("Error processing price update: " + std::string(e.what()), true);
+    }
+}
+
+// Get latest price for a symbol
+double FundingBot::getLatestPrice(const std::string& symbol) const {
+    try {
+        std::lock_guard<std::mutex> lock(price_mutex_);
+        auto it = latest_prices_.find(symbol);
+        if (it != latest_prices_.end()) {
+            return it->second;
+        }
+        
+        // If no WebSocket price available, fall back to exchange API
+        auto exchange_it = exchanges_.find(symbol.substr(0, symbol.find('_')));
+        if (exchange_it != exchanges_.end()) {
+            return exchange_it->second->getPrice(symbol);
+        }
+        
+        throw std::runtime_error("No price available for symbol: " + symbol);
+    } catch (const std::exception& e) {
+        log("Error getting latest price: " + std::string(e.what()), true);
+        return 0.0;
     }
 }
 

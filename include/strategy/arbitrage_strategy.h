@@ -31,6 +31,9 @@ public:
     // Monitor active positions
     virtual void monitorPositions() {}
     
+    // Get available symbols for this strategy
+    virtual std::set<std::string> getSymbols() const = 0;
+    
     // Configuration methods
     virtual void setMinFundingRate(double rate) { min_funding_rate_ = rate; }
     virtual void setMinExpectedProfit(double profit) { min_expected_profit_ = profit; }
@@ -53,6 +56,7 @@ public:
     bool executeTrade(const ArbitrageOpportunity& opportunity, double size) override;
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
+    std::set<std::string> getSymbols() const override;
 
 private:
     std::shared_ptr<ExchangeInterface> exchange_;
@@ -77,6 +81,7 @@ public:
     bool executeTrade(const ArbitrageOpportunity& opportunity, double size) override;
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
+    std::set<std::string> getSymbols() const override;
 
 private:
     // Calculate exchange risk based on historical reliability
@@ -109,6 +114,7 @@ public:
     bool executeTrade(const ArbitrageOpportunity& opportunity, double size) override;
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
+    std::set<std::string> getSymbols() const override;
 
 private:
     std::shared_ptr<ExchangeInterface> spot_exchange_;

@@ -7,6 +7,7 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <set>
 
 namespace funding {
 
@@ -764,6 +765,31 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
            << e.what();
         std::cerr << ss.str() << std::endl;
     }
+}
+
+std::set<std::string> CrossExchangeSpotPerpStrategy::getSymbols() const {
+    std::set<std::string> symbols;
+    
+    try {
+        // Get all available spot and perpetual instruments
+        auto spot_instruments = spot_exchange_->getAvailableInstruments(MarketType::SPOT);
+        auto perp_instruments = perp_exchange_->getAvailableInstruments(MarketType::PERPETUAL);
+        
+        // Add symbols from both exchanges
+        for (const auto& instrument : spot_instruments) {
+            symbols.insert(instrument.symbol);
+        }
+        for (const auto& instrument : perp_instruments) {
+            symbols.insert(instrument.symbol);
+        }
+        
+    } catch (const std::exception& e) {
+        std::stringstream ss;
+        ss << "Error in CrossExchangeSpotPerpStrategy::getSymbols: " << e.what();
+        std::cerr << ss.str() << std::endl;
+    }
+    
+    return symbols;
 }
 
 } // namespace funding 

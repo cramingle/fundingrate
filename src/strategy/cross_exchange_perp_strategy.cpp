@@ -4,9 +4,10 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <sstream>
 #include <thread>
 #include <chrono>
-#include <sstream>
+#include <set>
 #include <iomanip>
 #include <mutex>
 #include <atomic>
@@ -80,6 +81,30 @@ CrossExchangePerpStrategy::CrossExchangePerpStrategy(std::shared_ptr<ExchangeInt
     ss << "Initialized with exchanges: " << exchange1_->getName() 
        << " and " << exchange2_->getName();
     logMessage("CrossExchangePerpStrategy", ss.str());
+}
+
+std::set<std::string> CrossExchangePerpStrategy::getSymbols() const {
+    std::set<std::string> symbols;
+    
+    try {
+        // Get all available perpetual futures from both exchanges
+        auto perp_instruments1 = exchange1_->getAvailableInstruments(MarketType::PERPETUAL);
+        auto perp_instruments2 = exchange2_->getAvailableInstruments(MarketType::PERPETUAL);
+        
+        // Add symbols from both exchanges
+        for (const auto& instrument : perp_instruments1) {
+            symbols.insert(instrument.symbol);
+        }
+        for (const auto& instrument : perp_instruments2) {
+            symbols.insert(instrument.symbol);
+        }
+        
+    } catch (const std::exception& e) {
+        logMessage("CrossExchangePerpStrategy", 
+                  "Error getting available symbols: " + std::string(e.what()), true);
+    }
+    
+    return symbols;
 }
 
 std::vector<ArbitrageOpportunity> CrossExchangePerpStrategy::findOpportunities() {
