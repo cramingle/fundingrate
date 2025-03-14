@@ -392,8 +392,6 @@ std::vector<ArbitrageOpportunity> CrossExchangePerpStrategy::findOpportunities()
 
 // Calculate exchange risk based on historical reliability
 double CrossExchangePerpStrategy::calculateExchangeRisk(const std::string& exchange_name) {
-    // In a real implementation, this would use historical data on exchange reliability
-    // For now, just use some predefined values
     if (exchange_name == "Binance" || exchange_name == "Bybit") {
         return 5.0; // Lower risk for major exchanges
     } else if (exchange_name == "Bitget" || exchange_name == "OKX") {

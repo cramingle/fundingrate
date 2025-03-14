@@ -519,7 +519,10 @@ public:
                 json response = makeApiCall(endpoint, params.dump(), true, "POST");
                 
                 if (response["code"] == "00000" && response.contains("data")) {
-                    return response["data"]["orderId"].get<std::string>();
+                    std::string order_id = response["data"]["orderId"].get<std::string>();
+                    // Store order type
+                    order_types_[order_id] = true; // true for contract/futures
+                    return order_id;
                 } else {
                     throw std::runtime_error("Failed to place contract order: " + response.dump());
                 }
@@ -546,7 +549,10 @@ public:
                 json response = makeApiCall(endpoint, params.dump(), true, "POST");
                 
                 if (response["code"] == "00000" && response.contains("data")) {
-                    return response["data"]["orderId"].get<std::string>();
+                    std::string order_id = response["data"]["orderId"].get<std::string>();
+                    // Store order type
+                    order_types_[order_id] = false; // false for spot
+                    return order_id;
                 } else {
                     throw std::runtime_error("Failed to place spot order: " + response.dump());
                 }
@@ -559,42 +565,85 @@ public:
     
     bool cancelOrder(const std::string& order_id) override {
         try {
-            // We need to determine if this is a spot or futures order
-            // Bitget requires different endpoints and parameters for each
-            // In a real implementation, we would store order type when placing the order
-            // For now, let's try cancel on both endpoints
+            // Check if we have stored the order type
+            auto it = order_types_.find(order_id);
+            bool is_contract = false;
+            bool order_type_known = (it != order_types_.end());
+            
+            if (order_type_known) {
+                is_contract = it->second;
+            }
             
             bool success = false;
             json response;
             
-            // Try to cancel as spot order first
-            try {
-                std::string spot_endpoint = "/api/spot/v1/trade/cancel-order";
-                json spot_req = {
-                    {"orderId", order_id}
-                };
-                
-                response = makeApiCall(spot_endpoint, spot_req.dump(), true, "POST");
-                if (response["code"] == "00000") {
-                    success = true;
+            // If we know the order type, try that endpoint first
+            if (order_type_known) {
+                if (is_contract) {
+                    // Try futures endpoint
+                    std::string futures_endpoint = "/api/mix/v1/order/cancel-order";
+                    json futures_req = {
+                        {"orderId", order_id},
+                        {"marginCoin", "USDT"}, // Default to USDT, ideally we'd store the actual marginCoin
+                        {"symbol", ""} // Without symbol, will need to be determined from order ID
+                    };
+                    
+                    response = makeApiCall(futures_endpoint, futures_req.dump(), true, "POST");
+                    if (response["code"] == "00000") {
+                        success = true;
+                    }
+                } else {
+                    // Try spot endpoint
+                    std::string spot_endpoint = "/api/spot/v1/trade/cancel-order";
+                    json spot_req = {
+                        {"orderId", order_id}
+                    };
+                    
+                    response = makeApiCall(spot_endpoint, spot_req.dump(), true, "POST");
+                    if (response["code"] == "00000") {
+                        success = true;
+                    }
                 }
-            } catch (...) {
-                // If spot cancel fails, try futures
+            } else {
+                // If order type is unknown, try both endpoints as before
+                // Try to cancel as spot order first
+                try {
+                    std::string spot_endpoint = "/api/spot/v1/trade/cancel-order";
+                    json spot_req = {
+                        {"orderId", order_id}
+                    };
+                    
+                    response = makeApiCall(spot_endpoint, spot_req.dump(), true, "POST");
+                    if (response["code"] == "00000") {
+                        success = true;
+                        // Store for future reference
+                        order_types_[order_id] = false;
+                    }
+                } catch (...) {
+                    // If spot cancel fails, try futures
+                }
+                
+                // If spot cancel failed, try futures
+                if (!success) {
+                    std::string futures_endpoint = "/api/mix/v1/order/cancel-order";
+                    json futures_req = {
+                        {"orderId", order_id},
+                        {"marginCoin", "USDT"},
+                        {"symbol", ""} // Without symbol, will need to be determined from order ID
+                    };
+                    
+                    response = makeApiCall(futures_endpoint, futures_req.dump(), true, "POST");
+                    if (response["code"] == "00000") {
+                        success = true;
+                        // Store for future reference
+                        order_types_[order_id] = true;
+                    }
+                }
             }
             
-            // If spot cancel failed, try futures
-            if (!success) {
-                std::string futures_endpoint = "/api/mix/v1/order/cancel-order";
-                json futures_req = {
-                    {"orderId", order_id},
-                    {"marginCoin", "USDT"},
-                    {"symbol", ""} // Without symbol, will need to be determined from order ID
-                };
-                
-                response = makeApiCall(futures_endpoint, futures_req.dump(), true, "POST");
-                if (response["code"] == "00000") {
-                    success = true;
-                }
+            // Clean up the map to prevent it from growing too large
+            if (success) {
+                order_types_.erase(order_id);
             }
             
             return success;
@@ -606,59 +655,141 @@ public:
     
     OrderStatus getOrderStatus(const std::string& order_id) override {
         try {
-            // Similar to cancelOrder, we need to determine if this is a spot or futures order
-            // Try spot first
-            OrderStatus status = OrderStatus::REJECTED; // Default to rejected
+            // Check if we have stored the order type
+            auto it = order_types_.find(order_id);
+            bool is_contract = false;
+            bool order_type_known = (it != order_types_.end());
             
-            try {
-                std::string spot_endpoint = "/api/spot/v1/trade/orderInfo?orderId=" + order_id;
-                json response = makeApiCall(spot_endpoint, "", true);
-                
-                if (response["code"] == "00000" && response.contains("data")) {
-                    std::string status_str = response["data"]["status"];
-                    
-                    // Map Bitget status to our internal status
-                    if (status_str == "new" || status_str == "init") {
-                        status = OrderStatus::NEW;
-                    } else if (status_str == "partial_fill") {
-                        status = OrderStatus::PARTIALLY_FILLED;
-                    } else if (status_str == "full_fill") {
-                        status = OrderStatus::FILLED;
-                    } else if (status_str == "cancelled") {
-                        status = OrderStatus::CANCELED;
-                    } else if (status_str == "rejected") {
-                        status = OrderStatus::REJECTED;
-                    }
-                    
-                    return status;
-                }
-            } catch (...) {
-                // If spot query fails, try futures
+            if (order_type_known) {
+                is_contract = it->second;
             }
             
-            // Try futures
-            try {
-                std::string futures_endpoint = "/api/mix/v1/order/detail?orderId=" + order_id + "&marginCoin=USDT";
-                json response = makeApiCall(futures_endpoint, "", true);
-                
-                if (response["code"] == "00000" && response.contains("data")) {
-                    std::string status_str = response["data"]["state"];
-                    
-                    // Map Bitget futures status to our internal status
-                    if (status_str == "new" || status_str == "init") {
-                        status = OrderStatus::NEW;
-                    } else if (status_str == "partial_fill") {
-                        status = OrderStatus::PARTIALLY_FILLED;
-                    } else if (status_str == "filled") {
-                        status = OrderStatus::FILLED;
-                    } else if (status_str == "cancelled") {
-                        status = OrderStatus::CANCELED;
-                    } else if (status_str == "rejected") {
-                        status = OrderStatus::REJECTED;
+            OrderStatus status = OrderStatus::REJECTED; // Default to rejected
+            bool status_found = false;
+            
+            // If we know the order type, try that endpoint first
+            if (order_type_known) {
+                if (is_contract) {
+                    // Try futures endpoint
+                    try {
+                        std::string futures_endpoint = "/api/mix/v1/order/detail?orderId=" + order_id + "&marginCoin=USDT";
+                        json response = makeApiCall(futures_endpoint, "", true);
+                        
+                        if (response["code"] == "00000" && response.contains("data")) {
+                            std::string status_str = response["data"]["state"];
+                            
+                            // Map Bitget futures status to our internal status
+                            if (status_str == "new" || status_str == "init") {
+                                status = OrderStatus::NEW;
+                            } else if (status_str == "partial_fill") {
+                                status = OrderStatus::PARTIALLY_FILLED;
+                            } else if (status_str == "filled") {
+                                status = OrderStatus::FILLED;
+                            } else if (status_str == "cancelled") {
+                                status = OrderStatus::CANCELED;
+                            } else if (status_str == "rejected") {
+                                status = OrderStatus::REJECTED;
+                            }
+                            status_found = true;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error getting futures order status: " << e.what() << std::endl;
+                    }
+                } else {
+                    // Try spot endpoint
+                    try {
+                        std::string spot_endpoint = "/api/spot/v1/trade/orderInfo?orderId=" + order_id;
+                        json response = makeApiCall(spot_endpoint, "", true);
+                        
+                        if (response["code"] == "00000" && response.contains("data")) {
+                            std::string status_str = response["data"]["status"];
+                            
+                            // Map Bitget status to our internal status
+                            if (status_str == "new" || status_str == "init") {
+                                status = OrderStatus::NEW;
+                            } else if (status_str == "partial_fill") {
+                                status = OrderStatus::PARTIALLY_FILLED;
+                            } else if (status_str == "full_fill") {
+                                status = OrderStatus::FILLED;
+                            } else if (status_str == "cancelled") {
+                                status = OrderStatus::CANCELED;
+                            } else if (status_str == "rejected") {
+                                status = OrderStatus::REJECTED;
+                            }
+                            status_found = true;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error getting spot order status: " << e.what() << std::endl;
                     }
                 }
-            } catch (const std::exception& e) {
-                std::cerr << "Error getting futures order status: " << e.what() << std::endl;
+            }
+            
+            // If order type is unknown or the known endpoint failed, try both endpoints
+            if (!status_found) {
+                // Try spot first
+                try {
+                    std::string spot_endpoint = "/api/spot/v1/trade/orderInfo?orderId=" + order_id;
+                    json response = makeApiCall(spot_endpoint, "", true);
+                    
+                    if (response["code"] == "00000" && response.contains("data")) {
+                        std::string status_str = response["data"]["status"];
+                        
+                        // Map Bitget status to our internal status
+                        if (status_str == "new" || status_str == "init") {
+                            status = OrderStatus::NEW;
+                        } else if (status_str == "partial_fill") {
+                            status = OrderStatus::PARTIALLY_FILLED;
+                        } else if (status_str == "full_fill") {
+                            status = OrderStatus::FILLED;
+                        } else if (status_str == "cancelled") {
+                            status = OrderStatus::CANCELED;
+                        } else if (status_str == "rejected") {
+                            status = OrderStatus::REJECTED;
+                        }
+                        
+                        // Store for future reference
+                        order_types_[order_id] = false;
+                        status_found = true;
+                    }
+                } catch (...) {
+                    // If spot query fails, try futures
+                }
+                
+                // Try futures if spot failed
+                if (!status_found) {
+                    try {
+                        std::string futures_endpoint = "/api/mix/v1/order/detail?orderId=" + order_id + "&marginCoin=USDT";
+                        json response = makeApiCall(futures_endpoint, "", true);
+                        
+                        if (response["code"] == "00000" && response.contains("data")) {
+                            std::string status_str = response["data"]["state"];
+                            
+                            // Map Bitget futures status to our internal status
+                            if (status_str == "new" || status_str == "init") {
+                                status = OrderStatus::NEW;
+                            } else if (status_str == "partial_fill") {
+                                status = OrderStatus::PARTIALLY_FILLED;
+                            } else if (status_str == "filled") {
+                                status = OrderStatus::FILLED;
+                            } else if (status_str == "cancelled") {
+                                status = OrderStatus::CANCELED;
+                            } else if (status_str == "rejected") {
+                                status = OrderStatus::REJECTED;
+                            }
+                            
+                            // Store for future reference
+                            order_types_[order_id] = true;
+                            status_found = true;
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error getting futures order status: " << e.what() << std::endl;
+                    }
+                }
+            }
+            
+            // If the order is in a final state, we can remove it from our tracking map
+            if (status == OrderStatus::FILLED || status == OrderStatus::CANCELED || status == OrderStatus::REJECTED) {
+                order_types_.erase(order_id);
             }
             
             return status;
@@ -822,6 +953,9 @@ private:
     FeeStructure fee_structure_;
     std::map<std::string, std::pair<double, double>> symbol_fees_; // symbol -> (maker, taker)
     std::chrono::system_clock::time_point last_fee_update_;
+    
+    // Map to store order types: order_id -> is_contract (true for futures, false for spot)
+    std::map<std::string, bool> order_types_;
     
     // Generate Bitget API signature - using HMAC-SHA256
     std::string generateSignature(const std::string& timestamp, 
