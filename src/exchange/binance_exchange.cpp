@@ -197,29 +197,16 @@ public:
     double getPrice(const std::string& symbol) override {
         try {
             std::string endpoint = "/api/v3/ticker/price?symbol=" + symbol;
-            json response = makeApiCall(endpoint, "", false);
+            json response = makeApiCall(endpoint);
             
-            // Check if response is empty or doesn't contain required fields
-            if (response.empty()) {
-                std::cerr << "Empty response when fetching price for " << symbol << std::endl;
-                return 0.0;
-            }
-            
-            // Extract price
             if (response.contains("price")) {
-                if (response["price"].is_string()) {
-                    return std::stod(response["price"].get<std::string>());
-                } else if (response["price"].is_number()) {
-                    return response["price"].get<double>();
-                }
+                return std::stod(response["price"].get<std::string>());
+            } else {
+                throw std::runtime_error("Price data not found for symbol: " + symbol);
             }
-            
-            std::cerr << "Invalid response format when fetching price for " << symbol << std::endl;
-            return 0.0;
-            
         } catch (const std::exception& e) {
             std::cerr << "Error fetching price for " << symbol << ": " << e.what() << std::endl;
-            return 0.0;
+            throw;
         }
     }
     
@@ -272,62 +259,52 @@ public:
     }
     
     FundingRate getFundingRate(const std::string& symbol) override {
-        FundingRate rate;
-        rate.symbol = symbol;
-        rate.rate = 0.0;
-        rate.payment_interval = std::chrono::hours(8); // Binance pays funding every 8 hours
-        rate.next_payment = std::chrono::system_clock::now() + rate.payment_interval;
-        rate.predicted_rate = 0.0;
+        FundingRate funding;
+        funding.symbol = symbol;
         
         try {
+            // Binance futures API is on a different base URL
+            std::string original_base_url = base_url_;
+            base_url_ = "https://fapi.binance.com";
+            
             std::string endpoint = "/fapi/v1/premiumIndex?symbol=" + symbol;
-            json response = makeApiCall(endpoint, "", false);
+            json response = makeApiCall(endpoint);
             
-            // Check if response is empty or doesn't contain required fields
-            if (response.empty()) {
-                std::cerr << "Empty response when fetching funding rate for " << symbol << std::endl;
-                return rate;
-            }
+            // Restore original base URL
+            base_url_ = original_base_url;
             
-            // Extract funding rate
             if (response.contains("lastFundingRate")) {
-                if (response["lastFundingRate"].is_string()) {
-                    rate.rate = std::stod(response["lastFundingRate"].get<std::string>());
-                } else if (response["lastFundingRate"].is_number()) {
-                    rate.rate = response["lastFundingRate"].get<double>();
-                }
-            }
-            
-            // Extract next funding time
-            if (response.contains("nextFundingTime")) {
-                int64_t next_funding_ts = 0;
-                if (response["nextFundingTime"].is_string()) {
-                    next_funding_ts = std::stoll(response["nextFundingTime"].get<std::string>());
-                } else if (response["nextFundingTime"].is_number_integer()) {
-                    next_funding_ts = response["nextFundingTime"].get<int64_t>();
+                funding.rate = std::stod(response["lastFundingRate"].get<std::string>());
+                
+                // Get next funding time
+                if (response.contains("nextFundingTime")) {
+                    int64_t next_funding_ms = response["nextFundingTime"].get<int64_t>();
+                    funding.next_payment = std::chrono::system_clock::time_point(
+                        std::chrono::milliseconds(next_funding_ms));
+                } else {
+                    // Default to 8 hours from now if not provided
+                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
                 }
                 
-                if (next_funding_ts > 0) {
-                    rate.next_payment = std::chrono::system_clock::from_time_t(next_funding_ts / 1000);
-                }
-            }
-            
-            // Extract predicted rate if available
-            if (response.contains("predictedFundingRate")) {
-                if (response["predictedFundingRate"].is_string()) {
-                    rate.predicted_rate = std::stod(response["predictedFundingRate"].get<std::string>());
-                } else if (response["predictedFundingRate"].is_number()) {
-                    rate.predicted_rate = response["predictedFundingRate"].get<double>();
-                }
+                // Binance has 8-hour funding intervals
+                funding.payment_interval = std::chrono::hours(8);
+                
+                // Use current rate as predicted rate if not provided
+                funding.predicted_rate = funding.rate;
             } else {
-                rate.predicted_rate = rate.rate; // Use current rate as fallback
+                throw std::runtime_error("Funding rate data not found for symbol: " + symbol);
             }
-            
         } catch (const std::exception& e) {
             std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
+            
+            // Set default values on error
+            funding.rate = 0.0;
+            funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+            funding.payment_interval = std::chrono::hours(8);
+            funding.predicted_rate = 0.0;
         }
         
-        return rate;
+        return funding;
     }
     
     // Fee information
@@ -661,10 +638,12 @@ public:
     
     bool isConnected() override {
         try {
-            // Make a simple API call to test connectivity
+            // Use a simple ping endpoint to check connection
             std::string endpoint = "/api/v3/ping";
-            makeApiCall(endpoint);
-            return true;
+            json response = makeApiCall(endpoint);
+            
+            // Ping endpoint returns an empty object on success
+            return response.is_object();
         } catch (const std::exception& e) {
             std::cerr << "Binance connection check failed: " << e.what() << std::endl;
             return false;

@@ -78,6 +78,7 @@ private:
     std::string api_secret_;
     std::string passphrase_;
     std::string base_url_;
+    std::string futures_url_;
     bool use_testnet_;
     FeeStructure fee_structure_;
     std::map<std::string, std::pair<double, double>> symbol_fees_; // symbol -> (maker, taker)
@@ -92,11 +93,12 @@ private:
     // Get API key passphrase encrypted with API secret
     std::string getEncryptedPassphrase(const std::string& timestamp);
     
-    // Make API call to KuCoin
+    // Make API call to KuCoin with option to use futures API
     json makeApiCall(const std::string& endpoint, 
                     const std::string& request_body = "", 
                     bool is_private = false, 
-                    const std::string& method = "GET");
+                    const std::string& method = "GET",
+                    bool use_futures_api = false);
     
     // Update the fee structure from the exchange
     void updateFeeStructure();
@@ -108,11 +110,13 @@ KuCoinExchange::KuCoinExchange(const ExchangeConfig& config) :
     api_secret_(config.getApiSecret()),
     passphrase_(config.getParam("passphrase")),
     base_url_("https://api.kucoin.com"),
+    futures_url_("https://api-futures.kucoin.com"),
     use_testnet_(config.getUseTestnet()),
     last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
     
     if (use_testnet_) {
         base_url_ = "https://openapi-sandbox.kucoin.com";
+        futures_url_ = "https://api-sandbox-futures.kucoin.com";
     }
     
     // Initialize CURL
@@ -225,26 +229,27 @@ std::string KuCoinExchange::getEncryptedPassphrase(const std::string& timestamp)
     return std::string(base64_digest);
 }
 
-// Make API call to KuCoin
+// Make API call to KuCoin with option to use futures API
 json KuCoinExchange::makeApiCall(const std::string& endpoint, 
                                const std::string& request_body, 
                                bool is_private, 
-                               const std::string& method) {
+                               const std::string& method,
+                               bool use_futures_api) {
     CURL* curl = curl_easy_init();
     if (!curl) {
         throw std::runtime_error("Failed to initialize CURL");
     }
 
     std::string response_string;
-    std::string url = base_url_ + endpoint;
+    std::string url = (use_futures_api ? futures_url_ : base_url_) + endpoint;
     
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable SSL verification
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);        // 30 second timeout
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L); // 10 second connect timeout
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Follow redirects
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);       // Maximum number of redirects
     
@@ -801,39 +806,49 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
             kucoin_symbol = symbol.substr(0, symbol.find("USDT")) + "USDM";
         }
         
-        // KuCoin funding rate endpoint for futures
-        std::string endpoint = "/api/v1/contract/funding-rate/" + kucoin_symbol;
+        // Use the working KuCoin funding rate endpoint
+        std::string endpoint = "/api/v1/contract/funding-rates?symbol=" + kucoin_symbol + "&from=" + 
+                              std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count() - 86400000) + 
+                              "&to=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count());
         
-        // Make API call
-        json response = makeApiCall(endpoint);
+        // Make API call to futures API
+        json response = makeApiCall(endpoint, "", false, "GET", true);
         
         // Parse response
-        if (response["code"] == "200000" && response.contains("data")) {
-            auto& data = response["data"];
+        if (response["code"] == "200000" && response.contains("data") && response["data"].is_array() && !response["data"].empty()) {
+            // Get the most recent funding rate (first in the list)
+            auto& funding_data = response["data"][0];
             
-            // Parse current funding rate
-            if (data.contains("value")) {
-                rate.rate = std::stod(data["value"].get<std::string>());
+            // Parse funding rate
+            if (funding_data.contains("fundingRate")) {
+                // The fundingRate is always returned as a number
+                rate.rate = funding_data["fundingRate"].get<double>();
             } else {
                 throw std::runtime_error("Funding rate value not found for symbol: " + symbol);
             }
             
-            // Parse next funding time
-            if (data.contains("timePoint")) {
-                int64_t next_funding_ms = std::stoll(data["timePoint"].get<std::string>());
-                rate.next_payment = std::chrono::system_clock::from_time_t(next_funding_ms / 1000);
+            // Parse funding time
+            if (funding_data.contains("timepoint")) {
+                // The timepoint is always returned as a number (milliseconds)
+                int64_t funding_time_ms = funding_data["timepoint"].get<int64_t>();
+                
+                // Set the last funding time
+                auto last_funding_time = std::chrono::system_clock::from_time_t(funding_time_ms / 1000);
+                
+                // Next funding time is typically 8 hours after the last one
+                rate.next_payment = last_funding_time + std::chrono::hours(8);
+            } else {
+                // Default to 8 hours from now if timePoint is not available
+                rate.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
             }
             
             // KuCoin typically has 8-hour funding intervals
             rate.payment_interval = std::chrono::hours(8);
             
-            // Parse predicted rate if available
-            if (data.contains("predictedValue")) {
-                rate.predicted_rate = std::stod(data["predictedValue"].get<std::string>());
-            } else {
-                // If not available, use current rate as prediction
-                rate.predicted_rate = rate.rate;
-            }
+            // For predicted rate, we'll just use the current rate as there's no prediction in the history
+            rate.predicted_rate = rate.rate;
             
         } else {
             std::string error_msg = "Failed to get funding rate: ";

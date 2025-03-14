@@ -41,7 +41,7 @@ public:
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
-            base_url_ = "https://www.okx.com";
+            base_url_ = "https://www.okx.com"; // OKX uses the same base URL for testnet
         }
         
         // Initialize CURL
@@ -122,14 +122,45 @@ public:
     }
     
     double getPrice(const std::string& symbol) override {
-        std::string endpoint = "/api/v5/market/ticker?instId=" + symbol;
-        json response = makeApiCall(endpoint, "", false);
-        
-        if (response["code"] == "0" && !response["data"].empty()) {
-            return std::stod(response["data"][0]["last"].get<std::string>());
+        try {
+            // Convert symbol format if needed (e.g., BTCUSDT to BTC-USDT)
+            std::string okx_symbol = symbol;
+            if (symbol.find("-") == std::string::npos) {
+                // If the symbol doesn't contain a hyphen, try to insert one
+                size_t pos = symbol.find("USDT");
+                if (pos != std::string::npos) {
+                    okx_symbol = symbol.substr(0, pos) + "-" + symbol.substr(pos);
+                }
+            }
+            
+            // Endpoint for getting ticker information
+            std::string endpoint = "/api/v5/market/ticker?instId=" + okx_symbol;
+            
+            // Make API call
+            json response = makeApiCall(endpoint);
+            
+            // Parse response
+            if (response["code"] == "0" && response.contains("data") && !response["data"].empty()) {
+                auto& data = response["data"][0];
+                
+                if (data.contains("last")) {
+                    return std::stod(data["last"].get<std::string>());
+                } else {
+                    throw std::runtime_error("Price data not found for symbol: " + symbol);
+                }
+            } else {
+                std::string error_msg = "Failed to get price: ";
+                if (response.contains("msg")) {
+                    error_msg += response["msg"].get<std::string>();
+                } else {
+                    error_msg += "Unknown error";
+                }
+                throw std::runtime_error(error_msg);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching price for " << symbol << ": " << e.what() << std::endl;
+            throw;
         }
-        
-        throw std::runtime_error("Failed to get price for " + symbol);
     }
     
     OrderBook getOrderBook(const std::string& symbol, int depth) override {
@@ -167,40 +198,82 @@ public:
     }
     
     FundingRate getFundingRate(const std::string& symbol) override {
-        std::string endpoint = "/api/v5/public/funding-rate?instId=" + symbol;
-        json response = makeApiCall(endpoint, "", false);
-        
-        FundingRate rate;
-        rate.symbol = symbol;
+        FundingRate funding;
+        funding.symbol = symbol;
         
         try {
-            if (response["code"] == "0" && !response["data"].empty()) {
-                auto data = response["data"][0];
-                
-                // OKX provides funding rate as percentage already
-                rate.rate = std::stod(data["fundingRate"].get<std::string>()) / 100.0; // Convert from percentage
-                
-                // OKX has 8 hour funding intervals
-                rate.payment_interval = std::chrono::hours(8); 
-                
-                // Parse next funding time
-                std::string next_time_str = data["nextFundingTime"].get<std::string>();
-                auto next_time = std::chrono::system_clock::from_time_t(
-                    std::stoll(next_time_str) / 1000); // Convert from ms to seconds timestamp
-                rate.next_payment = next_time;
-                
-                // Predicted rate (may not be available)
-                if (data.contains("nextFundingRate")) {
-                    rate.predicted_rate = std::stod(data["nextFundingRate"].get<std::string>()) / 100.0;
-                } else {
-                    rate.predicted_rate = rate.rate; // Use current as fallback
+            // Convert symbol format if needed (e.g., BTCUSDT to BTC-USDT-SWAP)
+            std::string okx_symbol = symbol;
+            if (symbol.find("-") == std::string::npos) {
+                // If the symbol doesn't contain a hyphen, try to insert one
+                size_t pos = symbol.find("USDT");
+                if (pos != std::string::npos) {
+                    okx_symbol = symbol.substr(0, pos) + "-" + symbol.substr(pos);
                 }
             }
+            
+            // Add SWAP suffix if not present
+            if (okx_symbol.find("SWAP") == std::string::npos) {
+                okx_symbol += "-SWAP";
+            }
+            
+            // Endpoint for getting funding rate information
+            std::string endpoint = "/api/v5/public/funding-rate?instId=" + okx_symbol;
+            
+            // Make API call
+            json response = makeApiCall(endpoint);
+            
+            // Parse response
+            if (response["code"] == "0" && response.contains("data") && !response["data"].empty()) {
+                auto& data = response["data"][0];
+                
+                // Parse current funding rate
+                if (data.contains("fundingRate")) {
+                    funding.rate = std::stod(data["fundingRate"].get<std::string>());
+                } else {
+                    funding.rate = 0.0;
+                }
+                
+                // Parse next funding time
+                if (data.contains("nextFundingTime")) {
+                    std::string time_str = data["nextFundingTime"].get<std::string>();
+                    // Convert timestamp in milliseconds to time_point
+                    int64_t next_time_ms = std::stoll(time_str);
+                    funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
+                } else {
+                    // Default to 8 hours from now
+                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+                }
+                
+                // OKX has 8-hour funding intervals
+                funding.payment_interval = std::chrono::hours(8);
+                
+                // Use nextFundingRate if available, otherwise use current rate
+                if (data.contains("nextFundingRate") && !data["nextFundingRate"].get<std::string>().empty()) {
+                    funding.predicted_rate = std::stod(data["nextFundingRate"].get<std::string>());
+                } else {
+                    funding.predicted_rate = funding.rate;
+                }
+            } else {
+                std::string error_msg = "Failed to get funding rate: ";
+                if (response.contains("msg")) {
+                    error_msg += response["msg"].get<std::string>();
+                } else {
+                    error_msg += "Unknown error";
+                }
+                throw std::runtime_error(error_msg);
+            }
         } catch (const std::exception& e) {
-            std::cerr << "Error parsing OKX funding rate: " << e.what() << std::endl;
+            std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
+            
+            // Set default values on error
+            funding.rate = 0.0;
+            funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+            funding.payment_interval = std::chrono::hours(8);
+            funding.predicted_rate = 0.0;
         }
         
-        return rate;
+        return funding;
     }
     
     // Fee information
@@ -493,11 +566,11 @@ public:
     
     bool isConnected() override {
         try {
-            // Simple server time endpoint to check connection
+            // Use a simple status endpoint to check connection
             std::string endpoint = "/api/v5/public/time";
-            json response = makeApiCall(endpoint, "", false);
+            json response = makeApiCall(endpoint);
             
-            return (response["code"] == "0");
+            return response["code"] == "0";
         } catch (const std::exception& e) {
             std::cerr << "OKX connection check failed: " << e.what() << std::endl;
             return false;
@@ -511,7 +584,7 @@ public:
             for (int attempt = 1; attempt <= 3; attempt++) {
                 try {
                     // Simple ping endpoint to check connection
-                    std::string endpoint = "/public/time";
+                    std::string endpoint = "/api/v5/public/time";
                     json response = makeApiCall(endpoint, "", false);
                     
                     if (response.contains("code") && response["code"] == "0") {
