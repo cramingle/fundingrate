@@ -2,6 +2,7 @@
 #include <strategy/arbitrage_strategy.h>
 #include <strategy/composite_strategy.h>
 #include <exchange/types.h>
+#include <config/config_manager.h>
 #include "../exchange/mock_exchange.h"
 #include <memory>
 
@@ -97,9 +98,9 @@ TEST_F(StrategyFactoryTest, CreatesCrossExchangeSpotPerpStrategy) {
 
 TEST_F(StrategyFactoryTest, CreatesStrategyByType) {
     // Test creating each strategy type
-    auto strategy1 = createStrategy("SAME_EXCHANGE_SPOT_PERP", exchanges_);
-    auto strategy2 = createStrategy("CROSS_EXCHANGE_PERP_PERP", exchanges_);
-    auto strategy3 = createStrategy("CROSS_EXCHANGE_SPOT_PERP", exchanges_);
+    auto strategy1 = createStrategy("same_exchange_spot_perp", exchanges_);
+    auto strategy2 = createStrategy("cross_exchange_perp", exchanges_);
+    auto strategy3 = createStrategy("cross_exchange_spot_perp", exchanges_);
     
     // All strategies should be created
     ASSERT_NE(nullptr, strategy1);

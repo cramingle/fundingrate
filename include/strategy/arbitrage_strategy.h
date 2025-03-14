@@ -30,6 +30,16 @@ public:
     
     // Monitor active positions
     virtual void monitorPositions() {}
+    
+    // Configuration methods
+    virtual void setMinFundingRate(double rate) { min_funding_rate_ = rate; }
+    virtual void setMinExpectedProfit(double profit) { min_expected_profit_ = profit; }
+    virtual double getMinFundingRate() const { return min_funding_rate_; }
+    virtual double getMinExpectedProfit() const { return min_expected_profit_; }
+
+protected:
+    double min_funding_rate_ = 0.0001;     // Minimum funding rate to consider (0.01%)
+    double min_expected_profit_ = 1.0;     // Minimum expected profit (1%)
 };
 
 // For arbitrage between spot and perpetual markets on the same exchange
