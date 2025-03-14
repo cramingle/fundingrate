@@ -93,6 +93,85 @@ bool ConfigManager::loadConfig() {
             }
         }
         
+        // Load exchange configs
+        if (json_config.contains("exchanges")) {
+            auto& exchanges = json_config["exchanges"];
+            for (auto it = exchanges.begin(); it != exchanges.end(); ++it) {
+                std::string name = it.key();
+                auto& exchange_json = it.value();
+                
+                ExchangeConfig exchange_config;
+                if (exchange_json.contains("api_key")) {
+                    exchange_config.api_key = exchange_json["api_key"];
+                }
+                if (exchange_json.contains("api_secret")) {
+                    exchange_config.api_secret = exchange_json["api_secret"];
+                }
+                if (exchange_json.contains("passphrase")) {
+                    exchange_config.passphrase = exchange_json["passphrase"];
+                }
+                if (exchange_json.contains("base_url")) {
+                    exchange_config.base_url = exchange_json["base_url"];
+                }
+                if (exchange_json.contains("use_testnet")) {
+                    exchange_config.use_testnet = exchange_json["use_testnet"];
+                }
+                if (exchange_json.contains("connect_timeout_ms")) {
+                    exchange_config.connect_timeout_ms = exchange_json["connect_timeout_ms"];
+                }
+                if (exchange_json.contains("request_timeout_ms")) {
+                    exchange_config.request_timeout_ms = exchange_json["request_timeout_ms"];
+                }
+                
+                config_.exchanges[name] = exchange_config;
+            }
+        }
+        
+        // Load strategy configs
+        if (json_config.contains("strategies")) {
+            auto& strategies = json_config["strategies"];
+            for (const auto& strategy_json : strategies) {
+                StrategyConfig strategy_config;
+                
+                // Parse strategy type
+                if (strategy_json.contains("type")) {
+                    // Handle both string and number types
+                    if (strategy_json["type"].is_string()) {
+                        std::string type_str = strategy_json["type"];
+                        if (type_str == "SAME_EXCHANGE_SPOT_PERP" || type_str == "same_exchange_spot_perp" || type_str == "0") {
+                            strategy_config.type = StrategyType::SAME_EXCHANGE_SPOT_PERP;
+                        } else if (type_str == "CROSS_EXCHANGE_PERP_PERP" || type_str == "cross_exchange_perp" || type_str == "1") {
+                            strategy_config.type = StrategyType::CROSS_EXCHANGE_PERP_PERP;
+                        } else if (type_str == "CROSS_EXCHANGE_SPOT_PERP" || type_str == "cross_exchange_spot_perp" || type_str == "2") {
+                            strategy_config.type = StrategyType::CROSS_EXCHANGE_SPOT_PERP;
+                        }
+                    } else if (strategy_json["type"].is_number()) {
+                        // Handle numeric type directly
+                        int type_num = strategy_json["type"];
+                        if (type_num == 0) {
+                            strategy_config.type = StrategyType::SAME_EXCHANGE_SPOT_PERP;
+                        } else if (type_num == 1) {
+                            strategy_config.type = StrategyType::CROSS_EXCHANGE_PERP_PERP;
+                        } else if (type_num == 2) {
+                            strategy_config.type = StrategyType::CROSS_EXCHANGE_SPOT_PERP;
+                        }
+                    }
+                }
+                
+                if (strategy_json.contains("min_funding_rate")) {
+                    strategy_config.min_funding_rate = strategy_json["min_funding_rate"];
+                }
+                if (strategy_json.contains("min_expected_profit")) {
+                    strategy_config.min_expected_profit = strategy_json["min_expected_profit"];
+                }
+                if (strategy_json.contains("scan_interval_seconds")) {
+                    strategy_config.scan_interval_seconds = strategy_json["scan_interval_seconds"];
+                }
+                
+                config_.strategies.push_back(strategy_config);
+            }
+        }
+        
         return true;
     } catch (const std::exception& e) {
         std::cerr << "Error loading config: " << e.what() << std::endl;

@@ -55,3 +55,7 @@ logs/
 # Config files with API keys (to avoid accidental commit of credentials)
 config/*.json
 !config/bot_config.json.example 
+
+# Performance data files (to avoid committing user-specific performance data)
+data/performance.json
+!data/performance.json.example 
