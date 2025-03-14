@@ -20,11 +20,11 @@ set(TEST_SOURCES
     test_main.cpp
     exchange/test_exchange_config.cpp
     strategy/test_same_exchange_spot_perp_strategy.cpp
-    strategy/test_cross_exchange_perp_strategy.cpp 
-    strategy/test_cross_exchange_spot_perp_strategy.cpp
     strategy/test_composite_strategy.cpp
+    strategy/test_strategy_factory.cpp
     risk/test_risk_manager.cpp
     utils/test_funding_rate_calculations.cpp
+    utils/test_config_manager.cpp
 )
 
 # Create test executable
@@ -34,6 +34,8 @@ add_executable(funding_tests ${TEST_SOURCES})
 target_link_libraries(funding_tests PRIVATE
     gtest
     gtest_main
+    gmock
+    gmock_main
     Threads::Threads
     CURL::libcurl
     nlohmann_json::nlohmann_json

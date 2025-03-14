@@ -997,9 +997,9 @@ private:
 // Factory function declaration
 std::shared_ptr<ExchangeInterface> createBitgetExchange(const ExchangeConfig& config);
 
+} // namespace funding
+
 // Factory function implementation
 std::shared_ptr<funding::ExchangeInterface> funding::createBitgetExchange(const funding::ExchangeConfig& config) {
     return std::make_shared<funding::BitgetExchange>(config);
 }
-
-} // namespace funding 

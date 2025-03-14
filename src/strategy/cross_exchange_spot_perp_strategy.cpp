@@ -4,12 +4,19 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <sstream>
+#include <thread>
+#include <chrono>
 
 namespace funding {
 
 CrossExchangeSpotPerpStrategy::CrossExchangeSpotPerpStrategy(std::shared_ptr<ExchangeInterface> spot_exchange,
                                                            std::shared_ptr<ExchangeInterface> perp_exchange)
     : spot_exchange_(spot_exchange), perp_exchange_(perp_exchange) {
+    std::stringstream ss;
+    ss << "Initialized with spot exchange: " << spot_exchange_->getName() 
+       << " and perp exchange: " << perp_exchange_->getName();
+    std::cout << ss.str() << std::endl;
 }
 
 std::vector<ArbitrageOpportunity> CrossExchangeSpotPerpStrategy::findOpportunities() {
@@ -19,6 +26,12 @@ std::vector<ArbitrageOpportunity> CrossExchangeSpotPerpStrategy::findOpportuniti
         // Get all available instruments from both exchanges
         auto perp_instruments = perp_exchange_->getAvailableInstruments(MarketType::PERPETUAL);
         auto spot_instruments = spot_exchange_->getAvailableInstruments(MarketType::SPOT);
+        
+        std::stringstream ss;
+        ss << "Found " << perp_instruments.size() << " perpetual instruments on " 
+           << perp_exchange_->getName() << " and " << spot_instruments.size() 
+           << " spot instruments on " << spot_exchange_->getName();
+        std::cout << ss.str() << std::endl;
         
         // Find matching symbols across exchanges
         for (const auto& perp : perp_instruments) {
@@ -145,11 +158,23 @@ std::vector<ArbitrageOpportunity> CrossExchangeSpotPerpStrategy::findOpportuniti
             // Add to opportunities if estimated profit is positive AFTER transaction costs
             if (opportunity.estimated_profit > 0) {
                 opportunities.push_back(opportunity);
+                
+                // Log opportunity details
+                std::stringstream opportunity_ss;
+                opportunity_ss << "Found opportunity: " << spot_it->symbol << " on " << spot_exchange_->getName()
+                   << " vs " << perp.symbol << " on " << perp_exchange_->getName()
+                   << " | Funding rate: " << (funding.rate * 100.0) << "%"
+                   << " | Spread: " << price_spread_pct << "%"
+                   << " | Est. profit: " << opportunity.estimated_profit << "%"
+                   << " | Risk score: " << opportunity.position_risk_score;
+                std::cout << opportunity_ss.str() << std::endl;
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "Error in CrossExchangeSpotPerpStrategy::findOpportunities: " 
-                 << e.what() << std::endl;
+        std::stringstream error_ss;
+        error_ss << "Error in CrossExchangeSpotPerpStrategy::findOpportunities: " 
+                 << e.what();
+        std::cerr << error_ss.str() << std::endl;
     }
     
     // Sort opportunities by estimated profit (highest first)
@@ -157,6 +182,10 @@ std::vector<ArbitrageOpportunity> CrossExchangeSpotPerpStrategy::findOpportuniti
              [](const ArbitrageOpportunity& a, const ArbitrageOpportunity& b) {
                  return a.estimated_profit > b.estimated_profit;
              });
+    
+    std::stringstream summary_ss;
+    summary_ss << "Found " << opportunities.size() << " viable opportunities";
+    std::cout << summary_ss.str() << std::endl;
     
     return opportunities;
 }
@@ -175,6 +204,10 @@ bool CrossExchangeSpotPerpStrategy::validateOpportunity(const ArbitrageOpportuni
         
         // Check if spread has widened too much
         if (std::abs(current_spread_pct) > opportunity.max_allowable_spread) {
+            std::stringstream ss;
+            ss << "Spread too large: current " << current_spread_pct 
+               << "%, max allowed " << opportunity.max_allowable_spread << "%";
+            std::cout << ss.str() << std::endl;
             return false;
         }
         
@@ -187,13 +220,19 @@ bool CrossExchangeSpotPerpStrategy::validateOpportunity(const ArbitrageOpportuni
         if (std::abs(current_annualized_rate - opportunity.net_funding_rate) / 
             std::abs(opportunity.net_funding_rate) > 0.2 || 
             (current_annualized_rate * opportunity.net_funding_rate < 0)) {
+            std::stringstream ss;
+            ss << "Funding rate changed significantly: was " << opportunity.net_funding_rate 
+               << "%, now " << current_annualized_rate << "%";
+            std::cout << ss.str() << std::endl;
             return false;
         }
         
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error in CrossExchangeSpotPerpStrategy::validateOpportunity: " 
-                 << e.what() << std::endl;
+        std::stringstream ss;
+        ss << "Error in CrossExchangeSpotPerpStrategy::validateOpportunity: " 
+           << e.what();
+        std::cerr << ss.str() << std::endl;
         return false;
     }
 }
@@ -248,91 +287,100 @@ bool CrossExchangeSpotPerpStrategy::executeTrade(const ArbitrageOpportunity& opp
         std::string spot_order_id;
         std::string perp_order_id;
         
+        // Create order objects
+        Order spot_order;
+        spot_order.symbol = opportunity.pair.symbol1;
+        spot_order.side = spot_side;
+        spot_order.type = OrderType::MARKET;
+        spot_order.amount = spot_size;
+        spot_order.price = 0; // Market order
+        
+        Order perp_order;
+        perp_order.symbol = opportunity.pair.symbol2;
+        perp_order.side = perp_side;
+        perp_order.type = OrderType::MARKET;
+        perp_order.amount = perp_size;
+        perp_order.price = 0; // Market order
+        
         if (execute_spot_first) {
             // Execute spot order first
-            spot_order_id = spot_exchange_->placeOrder(
-                opportunity.pair.symbol1,
-                spot_side,
-                OrderType::MARKET,
-                spot_size
-            );
+            spot_order_id = spot_exchange_->placeOrder(spot_order);
             
             if (spot_order_id.empty()) {
-                std::cerr << "Failed to place spot order on " 
-                         << spot_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to place spot order on " 
+                   << spot_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
             
             // Execute perp order
-            perp_order_id = perp_exchange_->placeOrder(
-                opportunity.pair.symbol2,
-                perp_side,
-                OrderType::MARKET,
-                perp_size
-            );
+            perp_order_id = perp_exchange_->placeOrder(perp_order);
             
             if (perp_order_id.empty()) {
-                std::cerr << "Failed to place perp order on " << perp_exchange_->getName() 
-                         << ". Attempting to close spot position." << std::endl;
+                std::stringstream ss;
+                ss << "Failed to place perp order on " << perp_exchange_->getName() 
+                   << ". Attempting to close spot position.";
+                std::cerr << ss.str() << std::endl;
                 
                 // Try to close the spot position
-                spot_exchange_->placeOrder(
-                    opportunity.pair.symbol1,
-                    spot_side == OrderSide::BUY ? OrderSide::SELL : OrderSide::BUY,
-                    OrderType::MARKET,
-                    spot_size
-                );
+                Order spot_close_order;
+                spot_close_order.symbol = opportunity.pair.symbol1;
+                spot_close_order.side = spot_side == OrderSide::BUY ? OrderSide::SELL : OrderSide::BUY;
+                spot_close_order.type = OrderType::MARKET;
+                spot_close_order.amount = spot_size;
+                
+                spot_exchange_->placeOrder(spot_close_order);
                 
                 return false;
             }
         } else {
             // Execute perp order first
-            perp_order_id = perp_exchange_->placeOrder(
-                opportunity.pair.symbol2,
-                perp_side,
-                OrderType::MARKET,
-                perp_size
-            );
+            perp_order_id = perp_exchange_->placeOrder(perp_order);
             
             if (perp_order_id.empty()) {
-                std::cerr << "Failed to place perp order on " 
-                         << perp_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to place perp order on " 
+                   << perp_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
             
             // Execute spot order
-            spot_order_id = spot_exchange_->placeOrder(
-                opportunity.pair.symbol1,
-                spot_side,
-                OrderType::MARKET,
-                spot_size
-            );
+            spot_order_id = spot_exchange_->placeOrder(spot_order);
             
             if (spot_order_id.empty()) {
-                std::cerr << "Failed to place spot order on " << spot_exchange_->getName() 
-                         << ". Attempting to close perp position." << std::endl;
+                std::stringstream ss;
+                ss << "Failed to place spot order on " << spot_exchange_->getName() 
+                   << ". Attempting to close perp position.";
+                std::cerr << ss.str() << std::endl;
                 
                 // Try to close the perp position
-                perp_exchange_->placeOrder(
-                    opportunity.pair.symbol2,
-                    perp_side == OrderSide::BUY ? OrderSide::SELL : OrderSide::BUY,
-                    OrderType::MARKET,
-                    perp_size
-                );
+                Order perp_close_order;
+                perp_close_order.symbol = opportunity.pair.symbol2;
+                perp_close_order.side = perp_side == OrderSide::BUY ? OrderSide::SELL : OrderSide::BUY;
+                perp_close_order.type = OrderType::MARKET;
+                perp_close_order.amount = perp_size;
+                
+                perp_exchange_->placeOrder(perp_close_order);
                 
                 return false;
             }
         }
         
-        std::cout << "Successfully executed cross-exchange spot-perp arbitrage trade for " 
-                 << opportunity.pair.symbol1 << " on " << spot_exchange_->getName()
-                 << " and " << opportunity.pair.symbol2 << " on " << perp_exchange_->getName()
-                 << " with size " << size << " USD" << std::endl;
+        std::stringstream ss;
+        ss << "Successfully executed cross-exchange spot-perp arbitrage trade for " 
+           << opportunity.pair.symbol1 << " on " << spot_exchange_->getName()
+           << " and " << opportunity.pair.symbol2 << " on " << perp_exchange_->getName()
+           << " with size " << size << " USD";
+        std::cout << ss.str() << std::endl;
         
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error in CrossExchangeSpotPerpStrategy::executeTrade: " 
-                 << e.what() << std::endl;
+        std::stringstream ss;
+        ss << "Error in CrossExchangeSpotPerpStrategy::executeTrade: " 
+           << e.what();
+        std::cerr << ss.str() << std::endl;
         return false;
     }
 }
@@ -340,7 +388,7 @@ bool CrossExchangeSpotPerpStrategy::executeTrade(const ArbitrageOpportunity& opp
 bool CrossExchangeSpotPerpStrategy::closePosition(const ArbitrageOpportunity& opportunity) {
     try {
         // Get perp positions
-        auto perp_positions = perp_exchange_->getPositions();
+        auto perp_positions = perp_exchange_->getOpenPositions();
         
         // Find matching perpetual position
         auto perp_pos = std::find_if(perp_positions.begin(), perp_positions.end(),
@@ -349,8 +397,10 @@ bool CrossExchangeSpotPerpStrategy::closePosition(const ArbitrageOpportunity& op
                                     });
         
         if (perp_pos == perp_positions.end()) {
-            std::cerr << "No open perpetual position found for " 
-                     << opportunity.pair.symbol2 << std::endl;
+            std::stringstream ss;
+            ss << "No open perpetual position found for " 
+               << opportunity.pair.symbol2;
+            std::cerr << ss.str() << std::endl;
             return false;
         }
         
@@ -359,15 +409,22 @@ bool CrossExchangeSpotPerpStrategy::closePosition(const ArbitrageOpportunity& op
         double perp_size = std::abs(perp_pos->size);
         
         // Get spot balances to find spot position
-        auto balances = spot_exchange_->getBalances();
+        auto account_balance = spot_exchange_->getAccountBalance();
         std::string base_currency = opportunity.pair.symbol1.substr(0, opportunity.pair.symbol1.find('/'));
         
-        if (balances.find(base_currency) == balances.end() || std::abs(balances[base_currency]) < 0.00001) {
-            std::cerr << "No " << base_currency << " balance found on spot exchange" << std::endl;
+        // Check if we have the currency in our balance
+        double spot_size = 0.0;
+        if (account_balance.total.find(base_currency) != account_balance.total.end()) {
+            spot_size = account_balance.total[base_currency];
+        }
+        
+        if (spot_size < 0.00001) {
+            std::stringstream ss;
+            ss << "No " << base_currency << " balance found on spot exchange";
+            std::cerr << ss.str() << std::endl;
             return false;
         }
         
-        double spot_size = balances[base_currency];
         OrderSide spot_close_side = perp_close_side == OrderSide::BUY ? OrderSide::SELL : OrderSide::BUY;
         
         // Decide which to close first based on current liquidity
@@ -390,71 +447,76 @@ bool CrossExchangeSpotPerpStrategy::closePosition(const ArbitrageOpportunity& op
             for (const auto& level : perp_ob.asks) perp_liquidity += level.amount;
         }
         
+        // Create order objects
+        Order spot_close_order;
+        spot_close_order.symbol = opportunity.pair.symbol1;
+        spot_close_order.side = spot_close_side;
+        spot_close_order.type = OrderType::MARKET;
+        spot_close_order.amount = spot_size;
+        
+        Order perp_close_order;
+        perp_close_order.symbol = opportunity.pair.symbol2;
+        perp_close_order.side = perp_close_side;
+        perp_close_order.type = OrderType::MARKET;
+        perp_close_order.amount = perp_size;
+        
         // Close less liquid position first
         bool close_spot_first = spot_liquidity <= perp_liquidity;
         
         if (close_spot_first) {
             // Close spot position first
-            std::string spot_order_id = spot_exchange_->placeOrder(
-                opportunity.pair.symbol1,
-                spot_close_side,
-                OrderType::MARKET,
-                spot_size
-            );
+            std::string spot_order_id = spot_exchange_->placeOrder(spot_close_order);
             
             if (spot_order_id.empty()) {
-                std::cerr << "Failed to close spot position on " << spot_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to close spot position on " << spot_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
             
             // Then close perp position
-            std::string perp_order_id = perp_exchange_->placeOrder(
-                opportunity.pair.symbol2,
-                perp_close_side,
-                OrderType::MARKET,
-                perp_size
-            );
+            std::string perp_order_id = perp_exchange_->placeOrder(perp_close_order);
             
             if (perp_order_id.empty()) {
-                std::cerr << "Failed to close perpetual position on " << perp_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to close perpetual position on " << perp_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
         } else {
             // Close perp position first
-            std::string perp_order_id = perp_exchange_->placeOrder(
-                opportunity.pair.symbol2,
-                perp_close_side,
-                OrderType::MARKET,
-                perp_size
-            );
+            std::string perp_order_id = perp_exchange_->placeOrder(perp_close_order);
             
             if (perp_order_id.empty()) {
-                std::cerr << "Failed to close perpetual position on " << perp_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to close perpetual position on " << perp_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
             
             // Then close spot position
-            std::string spot_order_id = spot_exchange_->placeOrder(
-                opportunity.pair.symbol1,
-                spot_close_side,
-                OrderType::MARKET,
-                spot_size
-            );
+            std::string spot_order_id = spot_exchange_->placeOrder(spot_close_order);
             
             if (spot_order_id.empty()) {
-                std::cerr << "Failed to close spot position on " << spot_exchange_->getName() << std::endl;
+                std::stringstream ss;
+                ss << "Failed to close spot position on " << spot_exchange_->getName();
+                std::cerr << ss.str() << std::endl;
                 return false;
             }
         }
         
-        std::cout << "Successfully closed cross-exchange spot-perp arbitrage position for " 
-                 << opportunity.pair.symbol1 << " on " << spot_exchange_->getName()
-                 << " and " << opportunity.pair.symbol2 << " on " << perp_exchange_->getName() << std::endl;
+        std::stringstream ss;
+        ss << "Successfully closed cross-exchange spot-perp arbitrage position for " 
+           << opportunity.pair.symbol1 << " on " << spot_exchange_->getName()
+           << " and " << opportunity.pair.symbol2 << " on " << perp_exchange_->getName();
+        std::cout << ss.str() << std::endl;
         
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error in CrossExchangeSpotPerpStrategy::closePosition: " 
-                 << e.what() << std::endl;
+        std::stringstream ss;
+        ss << "Error in CrossExchangeSpotPerpStrategy::closePosition: " 
+           << e.what();
+        std::cerr << ss.str() << std::endl;
         return false;
     }
 }
@@ -462,10 +524,10 @@ bool CrossExchangeSpotPerpStrategy::closePosition(const ArbitrageOpportunity& op
 void CrossExchangeSpotPerpStrategy::monitorPositions() {
     try {
         // Get perp positions
-        auto perp_positions = perp_exchange_->getPositions();
+        auto perp_positions = perp_exchange_->getOpenPositions();
         
         // Get spot balances
-        auto spot_balances = spot_exchange_->getBalances();
+        auto account_balance = spot_exchange_->getAccountBalance();
         
         // For each perp position, find corresponding spot position
         for (const auto& perp_pos : perp_positions) {
@@ -480,19 +542,23 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
             std::string base_currency = symbol.substr(0, symbol.find('/'));
             
             // Check if we have a corresponding spot balance
-            if (spot_balances.find(base_currency) == spot_balances.end() || 
-                std::abs(spot_balances[base_currency]) < 0.00001) {
-                continue; // No matching spot position
+            double spot_size = 0.0;
+            if (account_balance.total.find(base_currency) != account_balance.total.end()) {
+                spot_size = account_balance.total[base_currency];
             }
             
-            double spot_size = spot_balances[base_currency];
+            if (std::abs(spot_size) < 0.00001) {
+                continue; // No matching spot position
+            }
             
             // Verify spot and perp positions have opposite signs (proper hedge)
             bool is_perp_long = perp_pos.size > 0;
             bool is_spot_long = spot_size > 0;
             
             if ((is_perp_long && is_spot_long) || (!is_perp_long && !is_spot_long)) {
-                std::cerr << "Warning: Positions on " << symbol << " are not properly hedged" << std::endl;
+                std::stringstream ss;
+                ss << "Warning: Positions on " << symbol << " are not properly hedged";
+                std::cerr << ss.str() << std::endl;
                 continue;
             }
             
@@ -531,8 +597,10 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
             bool is_current_funding_positive = funding.rate > 0;
             
             if (is_original_funding_positive != is_current_funding_positive) {
-                std::cout << "Warning: Funding rate sign has flipped for " << symbol 
-                          << ". Planning emergency position reduction." << std::endl;
+                std::stringstream ss;
+                ss << "Warning: Funding rate sign has flipped for " << symbol
+                   << ". Planning emergency position reduction.";
+                std::cout << ss.str() << std::endl;
                 
                 // Close 75% of the position immediately
                 double emergency_reduction = 0.75;
@@ -542,16 +610,31 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
                 OrderSide perp_close_side = perp_pos.size > 0 ? OrderSide::SELL : OrderSide::BUY;
                 OrderSide spot_close_side = spot_size > 0 ? OrderSide::SELL : OrderSide::BUY;
                 
+                // Create order objects
+                Order perp_order;
+                perp_order.symbol = symbol;
+                perp_order.side = perp_close_side;
+                perp_order.type = OrderType::MARKET;
+                perp_order.amount = perp_reduce_size;
+                
+                Order spot_order;
+                spot_order.symbol = spot_symbol;
+                spot_order.side = spot_close_side;
+                spot_order.type = OrderType::MARKET;
+                spot_order.amount = spot_reduce_size;
+                
                 // Execute reduction - for emergency, close larger value position first
                 if (std::abs(perp_pos.size * perp_price) >= std::abs(spot_size * spot_price)) {
-                    perp_exchange_->placeOrder(symbol, perp_close_side, OrderType::MARKET, perp_reduce_size);
-                    spot_exchange_->placeOrder(spot_symbol, spot_close_side, OrderType::MARKET, spot_reduce_size);
+                    perp_exchange_->placeOrder(perp_order);
+                    spot_exchange_->placeOrder(spot_order);
                 } else {
-                    spot_exchange_->placeOrder(spot_symbol, spot_close_side, OrderType::MARKET, spot_reduce_size);
-                    perp_exchange_->placeOrder(symbol, perp_close_side, OrderType::MARKET, perp_reduce_size);
+                    spot_exchange_->placeOrder(spot_order);
+                    perp_exchange_->placeOrder(perp_order);
                 }
                 
-                std::cout << "Emergency position reduction completed for " << symbol << std::endl;
+                std::stringstream completion_ss;
+                completion_ss << "Emergency position reduction completed for " << symbol;
+                std::cout << completion_ss.str() << std::endl;
                 continue;
             }
             
@@ -560,18 +643,24 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
             
             if (std::abs(current_spread_pct) >= warning_threshold_3) {
                 reduction_pct = 0.5; // Reduce by 50% at 75% of max spread
-                std::cout << "Warning: Spread at 75% of maximum for " << symbol 
-                          << ". Reducing position by 50%" << std::endl;
+                std::stringstream ss;
+                ss << "Warning: Spread at 75% of maximum for " << symbol
+                   << ". Reducing position by 50%";
+                std::cout << ss.str() << std::endl;
             } 
             else if (std::abs(current_spread_pct) >= warning_threshold_2) {
                 reduction_pct = 0.3; // Reduce by 30% at 60% of max spread
-                std::cout << "Warning: Spread at 60% of maximum for " << symbol 
-                          << ". Reducing position by 30%" << std::endl;
+                std::stringstream ss;
+                ss << "Warning: Spread at 60% of maximum for " << symbol
+                   << ". Reducing position by 30%";
+                std::cout << ss.str() << std::endl;
             }
             else if (std::abs(current_spread_pct) >= warning_threshold_1) {
                 reduction_pct = 0.2; // Reduce by 20% at 40% of max spread
-                std::cout << "Warning: Spread at 40% of maximum for " << symbol 
-                          << ". Reducing position by 20%" << std::endl;
+                std::stringstream ss;
+                ss << "Warning: Spread at 40% of maximum for " << symbol
+                   << ". Reducing position by 20%";
+                std::cout << ss.str() << std::endl;
             }
             
             // If reduction needed
@@ -602,6 +691,19 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
                     for (const auto& level : perp_ob.asks) perp_liquidity += level.amount;
                 }
                 
+                // Create order objects
+                Order spot_order;
+                spot_order.symbol = spot_symbol;
+                spot_order.side = spot_close_side;
+                spot_order.type = OrderType::MARKET;
+                spot_order.amount = spot_reduce_size;
+                
+                Order perp_order;
+                perp_order.symbol = symbol;
+                perp_order.side = perp_close_side;
+                perp_order.type = OrderType::MARKET;
+                perp_order.amount = perp_reduce_size;
+                
                 // Close the less liquid position first
                 bool close_spot_first = spot_liquidity <= perp_liquidity;
                 
@@ -611,46 +713,52 @@ void CrossExchangeSpotPerpStrategy::monitorPositions() {
                 
                 if (close_spot_first) {
                     // Reduce spot first
-                    spot_order_id = spot_exchange_->placeOrder(
-                        spot_symbol, spot_close_side, OrderType::MARKET, spot_reduce_size);
+                    spot_order_id = spot_exchange_->placeOrder(spot_order);
                     
                     if (spot_order_id.empty()) {
-                        std::cerr << "Failed to reduce spot position for " << spot_symbol << std::endl;
+                        std::stringstream error_ss;
+                        error_ss << "Failed to reduce spot position for " << spot_symbol;
+                        std::cerr << error_ss.str() << std::endl;
                         continue;
                     }
                     
                     // Then reduce perp
-                    perp_order_id = perp_exchange_->placeOrder(
-                        symbol, perp_close_side, OrderType::MARKET, perp_reduce_size);
+                    perp_order_id = perp_exchange_->placeOrder(perp_order);
                 } else {
                     // Reduce perp first
-                    perp_order_id = perp_exchange_->placeOrder(
-                        symbol, perp_close_side, OrderType::MARKET, perp_reduce_size);
+                    perp_order_id = perp_exchange_->placeOrder(perp_order);
                     
                     if (perp_order_id.empty()) {
-                        std::cerr << "Failed to reduce perp position for " << symbol << std::endl;
+                        std::stringstream error_ss;
+                        error_ss << "Failed to reduce perp position for " << symbol;
+                        std::cerr << error_ss.str() << std::endl;
                         continue;
                     }
                     
                     // Then reduce spot
-                    spot_order_id = spot_exchange_->placeOrder(
-                        spot_symbol, spot_close_side, OrderType::MARKET, spot_reduce_size);
+                    spot_order_id = spot_exchange_->placeOrder(spot_order);
                 }
                 
                 if (spot_order_id.empty() || perp_order_id.empty()) {
-                    std::cerr << "Failed to complete position reduction on both exchanges" << std::endl;
+                    std::stringstream error_ss;
+                    error_ss << "Failed to complete position reduction on both exchanges";
+                    std::cerr << error_ss.str() << std::endl;
                     continue;
                 }
                 
-                std::cout << "Successfully reduced cross-exchange spot-perp position for " << symbol 
-                          << " by " << (reduction_pct * 100.0) << "%. "
-                          << "Current spread: " << current_spread_pct << "%, "
-                          << "Max allowed: " << max_allowable_spread << "%" << std::endl;
+                std::stringstream ss;
+                ss << "Successfully reduced cross-exchange spot-perp position for " << symbol 
+                   << " by " << (reduction_pct * 100.0) << "%. "
+                   << "Current spread: " << current_spread_pct << "%, "
+                   << "Max allowed: " << max_allowable_spread << "%";
+                std::cout << ss.str() << std::endl;
             }
         }
     } catch (const std::exception& e) {
-        std::cerr << "Error in CrossExchangeSpotPerpStrategy::monitorPositions: " 
-                 << e.what() << std::endl;
+        std::stringstream ss;
+        ss << "Error in CrossExchangeSpotPerpStrategy::monitorPositions: " 
+           << e.what();
+        std::cerr << ss.str() << std::endl;
     }
 }
 
