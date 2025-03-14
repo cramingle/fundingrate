@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
 #include <config/config_manager.h>
 #include <risk/risk_manager.h>
 #include <exchange/exchange_interface.h>
@@ -50,6 +51,7 @@ public:
 
 private:
     // Configuration
+    std::string config_file_;
     std::unique_ptr<ConfigManager> config_manager_;
     std::unique_ptr<RiskManager> risk_manager_;
     
@@ -68,17 +70,24 @@ private:
     
     // Performance tracking
     PerformanceStats performance_;
+    std::chrono::system_clock::time_point last_performance_update_;
     
     // Private methods
     void mainLoop();
     void monitorLoop();
     void scanForOpportunities();
-    void processOpportunity(const ArbitrageOpportunity& opportunity);
+    bool processOpportunity(const ArbitrageOpportunity& opportunity);
     void monitorPositions();
     void updatePerformanceStats();
     bool connectExchanges();
     void disconnectExchanges();
     void loadStrategies();
+    
+    // State management
+    void saveState();
+    void loadSavedState();
+    void savePerformanceStats();
+    void loadPerformanceStats();
 };
 
 } // namespace funding 
