@@ -1,0 +1,31 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential libcurl4-openssl-dev nlohmann-json3-dev
+
+    - name: Create build directory
+      run: mkdir -p build
+      
+    - name: Configure CMake
+      run: cd build && cmake .. -DBUILD_TESTING=ON
+      
+    - name: Build
+      run: cd build && make
+      
+    - name: Run tests
+      run: cd build && ctest --output-on-failure 
