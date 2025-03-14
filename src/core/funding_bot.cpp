@@ -729,26 +729,57 @@ bool FundingBot::connectExchanges() {
             return false;
         }
         
-        // Log connected exchanges
-        std::stringstream ss;
-        ss << "Connected to " << exchanges_.size() << " exchanges: ";
-        bool first = true;
-        for (const auto& [name, exchange] : exchanges_) {
-            if (!first) {
-                ss << ", ";
-            }
-            ss << name;
-            first = false;
+        // Track successful connections
+        std::vector<std::string> connected_exchanges;
+        std::vector<std::string> failed_exchanges;
+        
+        // Try to connect to each exchange
+        for (auto it = exchanges_.begin(); it != exchanges_.end();) {
+            const std::string& name = it->first;
+            auto& exchange = it->second;
             
             // Check if exchange is connected
-            if (!exchange->isConnected()) {
-                log("Failed to connect to exchange: " + name, true);
-                return false;
+            if (exchange->isConnected()) {
+                connected_exchanges.push_back(name);
+                ++it; // Move to next exchange
+            } else {
+                // Try to reconnect
+                log("Failed to connect to exchange: " + name + ", attempting to reconnect...");
+                if (exchange->reconnect()) {
+                    connected_exchanges.push_back(name);
+                    ++it; // Move to next exchange
+                } else {
+                    failed_exchanges.push_back(name);
+                    log("Failed to reconnect to exchange: " + name + ", removing from active exchanges", true);
+                    it = exchanges_.erase(it); // Remove exchange and move to next
+                }
             }
         }
-        log(ss.str());
         
-        return true;
+        // Log connected exchanges
+        if (!connected_exchanges.empty()) {
+            std::stringstream ss;
+            ss << "Connected to " << connected_exchanges.size() << " exchanges: ";
+            for (size_t i = 0; i < connected_exchanges.size(); ++i) {
+                if (i > 0) ss << ", ";
+                ss << connected_exchanges[i];
+            }
+            log(ss.str());
+        }
+        
+        // Log failed exchanges
+        if (!failed_exchanges.empty()) {
+            std::stringstream ss;
+            ss << "Failed to connect to " << failed_exchanges.size() << " exchanges: ";
+            for (size_t i = 0; i < failed_exchanges.size(); ++i) {
+                if (i > 0) ss << ", ";
+                ss << failed_exchanges[i];
+            }
+            log(ss.str(), true);
+        }
+        
+        // Return true if we have at least one connected exchange
+        return !exchanges_.empty();
     } catch (const std::exception& e) {
         log("Error connecting to exchanges: " + std::string(e.what()), true);
         return false;

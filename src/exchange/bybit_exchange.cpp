@@ -625,7 +625,8 @@ public:
             json response = makeApiCall(endpoint, "", false);
             
             return (response["retCode"] == 0);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            std::cerr << "Bybit connection check failed: " << e.what() << std::endl;
             return false;
         }
     }
@@ -633,8 +634,18 @@ public:
     bool reconnect() override {
         // Clear any cached data and try to connect again
         try {
-            return isConnected();
-        } catch (...) {
+            // Try up to 3 times with a short delay between attempts
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                if (isConnected()) {
+                    return true;
+                }
+                
+                std::cerr << "Bybit reconnect attempt " << attempt << " failed, retrying..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            return false;
+        } catch (const std::exception& e) {
+            std::cerr << "Bybit reconnect failed: " << e.what() << std::endl;
             return false;
         }
     }
@@ -681,6 +692,13 @@ private:
         // This is necessary because Bybit's SSL certificates might not be properly validated
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        
+        // Set connection timeout to prevent hanging
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        
+        // Enable verbose output for debugging
+        // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
         
         struct curl_slist* headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");

@@ -937,8 +937,18 @@ public:
             curl_global_cleanup();
             curl_global_init(CURL_GLOBAL_ALL);
             
-            // Test the connection after re-initializing
-            return isConnected();
+            // Try up to 3 times with a short delay between attempts
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                if (isConnected()) {
+                    return true;
+                }
+                
+                std::cerr << "Bitget reconnect attempt " << attempt << " failed, retrying..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            
+            std::cerr << "Failed to reconnect to Bitget after 3 attempts" << std::endl;
+            return false;
         } catch (const std::exception& e) {
             std::cerr << "Bitget reconnection failed: " << e.what() << std::endl;
             return false;

@@ -510,9 +510,20 @@ public:
     bool reconnect() override {
         // Clear any cached data and try to connect again
         try {
-            // Reestablish connection
-            return isConnected();
-        } catch (...) {
+            // Try up to 3 times with a short delay between attempts
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                if (isConnected()) {
+                    return true;
+                }
+                
+                std::cerr << "OKX reconnect attempt " << attempt << " failed, retrying..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            
+            std::cerr << "Failed to reconnect to OKX after 3 attempts" << std::endl;
+            return false;
+        } catch (const std::exception& e) {
+            std::cerr << "OKX reconnection failed: " << e.what() << std::endl;
             return false;
         }
     }
@@ -546,7 +557,7 @@ private:
     
     // Make API call to OKX
     json makeApiCall(const std::string& endpoint, const std::string& request_body = "", 
-                     bool is_private = false, const std::string& method = "GET") {
+                    bool is_private = false, const std::string& method = "GET") {
         CURL* curl = curl_easy_init();
         std::string response_string;
         std::string url = base_url_ + endpoint;
@@ -555,17 +566,33 @@ private:
             throw std::runtime_error("Failed to initialize CURL");
         }
         
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        
+        // Enable SSL verification with proper error handling
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        
+        // Set connection and request timeouts
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        
+        // Set request method
+        if (method != "GET") {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+        }
+        
+        // Prepare headers
         struct curl_slist* headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");
         
-        // Add authentication headers for private endpoints
+        // Handle authenticated requests
         if (is_private) {
-            // Generate ISO timestamp
+            // Current UTC timestamp in milliseconds
             auto now = std::chrono::system_clock::now();
-            auto itt = std::chrono::system_clock::to_time_t(now);
-            std::ostringstream ss;
-            ss << std::put_time(gmtime(&itt), "%Y-%m-%dT%H:%M:%S.000Z");
-            std::string timestamp = ss.str();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            std::string timestamp = std::to_string(ms);
             
             // Generate signature
             std::string signature = generateSignature(timestamp, method, endpoint, request_body);
@@ -575,34 +602,60 @@ private:
             headers = curl_slist_append(headers, ("OK-ACCESS-SIGN: " + signature).c_str());
             headers = curl_slist_append(headers, ("OK-ACCESS-TIMESTAMP: " + timestamp).c_str());
             headers = curl_slist_append(headers, ("OK-ACCESS-PASSPHRASE: " + passphrase_).c_str());
+            
+            if (use_testnet_) {
+                headers = curl_slist_append(headers, "x-simulated-trading: 1");
+            }
         }
         
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
         
-        // Disable SSL verification for production use
-        // This is necessary because OKX's SSL certificates might not be properly validated
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        
-        // Set method and request body
-        if (method == "POST") {
-            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        // Set request body for POST/PUT requests
+        if (!request_body.empty()) {
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_body.c_str());
-        } else if (method == "DELETE") {
-            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
         }
         
-        CURLcode res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
+        // Perform the request with retry logic
+        CURLcode res;
+        int retry_count = 0;
+        const int max_retries = 3;
+        
+        do {
+            res = curl_easy_perform(curl);
+            if (res != CURLE_OK) {
+                std::string error_msg = curl_easy_strerror(res);
+                std::cerr << "CURL request failed (attempt " << retry_count + 1 << "/" << max_retries 
+                         << "): " << error_msg << std::endl;
+                
+                if (retry_count < max_retries - 1) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    retry_count++;
+                    continue;
+                }
+                
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                throw std::runtime_error("CURL request failed after " + std::to_string(max_retries) + 
+                                       " attempts: " + error_msg);
+            }
+            break;
+        } while (retry_count < max_retries);
+        
+        // Get HTTP response code
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        
+        // Clean up
         curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
         
-        if (res != CURLE_OK) {
-            throw std::runtime_error("CURL request failed: " + std::string(curl_easy_strerror(res)));
+        // Check HTTP response code
+        if (http_code != 200) {
+            throw std::runtime_error("HTTP request failed with code " + std::to_string(http_code) + 
+                                   ": " + response_string);
         }
         
+        // Parse JSON response
         try {
             return json::parse(response_string);
         } catch (const std::exception& e) {

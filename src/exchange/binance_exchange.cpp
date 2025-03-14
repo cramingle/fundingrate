@@ -223,51 +223,308 @@ public:
     
     // Placeholder implementations for remaining methods
     AccountBalance getAccountBalance() override {
-        // Implementation would go here
-        return AccountBalance();
+        AccountBalance balance;
+        
+        try {
+            // Call Binance API to get account information
+            std::string endpoint = "/api/v3/account";
+            json response = makeApiCall(endpoint, "", true);
+            
+            // Process balances from the response
+            if (response.contains("balances") && response["balances"].is_array()) {
+                for (const auto& asset : response["balances"]) {
+                    std::string currency = asset["asset"].get<std::string>();
+                    double free = std::stod(asset["free"].get<std::string>());
+                    double locked = std::stod(asset["locked"].get<std::string>());
+                    double total = free + locked;
+                    
+                    // Only add assets with non-zero balance
+                    if (total > 0.0) {
+                        balance.total[currency] = total;
+                        balance.available[currency] = free;
+                        balance.locked[currency] = locked;
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching Binance account balance: " << e.what() << std::endl;
+        }
+        
+        return balance;
     }
     
     std::vector<Position> getOpenPositions() override {
-        // Implementation would go here
-        return std::vector<Position>();
+        std::vector<Position> positions;
+        
+        try {
+            // For futures positions
+            std::string endpoint = "/fapi/v2/positionRisk";
+            json response = makeApiCall(endpoint, "", true);
+            
+            if (response.is_array()) {
+                for (const auto& pos : response) {
+                    // Skip positions with zero amount
+                    double positionAmt = std::stod(pos["positionAmt"].get<std::string>());
+                    if (std::abs(positionAmt) < 0.000001) {
+                        continue;
+                    }
+                    
+                    Position position;
+                    position.symbol = pos["symbol"].get<std::string>();
+                    position.size = positionAmt; // Already positive for long, negative for short
+                    position.entry_price = std::stod(pos["entryPrice"].get<std::string>());
+                    position.liquidation_price = std::stod(pos["liquidationPrice"].get<std::string>());
+                    position.unrealized_pnl = std::stod(pos["unRealizedProfit"].get<std::string>());
+                    position.leverage = std::stod(pos["leverage"].get<std::string>());
+                    
+                    positions.push_back(position);
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching Binance positions: " << e.what() << std::endl;
+        }
+        
+        return positions;
     }
     
     std::string placeOrder(const Order& order) override {
-        // Implementation would go here
-        return "order-id-placeholder";
+        try {
+            std::string endpoint;
+            std::string params;
+            
+            // Determine if this is a spot or futures order based on the symbol
+            bool is_futures = order.symbol.find("PERP") != std::string::npos || 
+                             order.symbol.find("USDT_PERP") != std::string::npos;
+            
+            if (is_futures) {
+                endpoint = "/fapi/v1/order";
+            } else {
+                endpoint = "/api/v3/order";
+            }
+            
+            // Build parameters
+            params = "symbol=" + order.symbol;
+            params += "&side=" + std::string(order.side == OrderSide::BUY ? "BUY" : "SELL");
+            params += "&type=" + std::string(order.type == OrderType::MARKET ? "MARKET" : "LIMIT");
+            params += "&quantity=" + std::to_string(order.amount);
+            
+            // Add price for limit orders
+            if (order.type == OrderType::LIMIT) {
+                params += "&price=" + std::to_string(order.price);
+                params += "&timeInForce=GTC"; // Good Till Cancelled
+            }
+            
+            // Make the API call
+            json response = makeApiCall(endpoint, params, true);
+            
+            // Extract and return the order ID
+            if (response.contains("orderId")) {
+                return std::to_string(response["orderId"].get<int64_t>());
+            } else {
+                throw std::runtime_error("Order placement failed: No order ID in response");
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error placing Binance order: " << e.what() << std::endl;
+            throw; // Re-throw to let caller handle the error
+        }
     }
     
     bool cancelOrder(const std::string& order_id) override {
-        // Implementation would go here
-        return true;
+        try {
+            // We need the symbol for Binance API, but it's not provided in the parameter
+            // In a real implementation, you would need to store a mapping of order_id to symbol
+            // or retrieve the symbol from the exchange
+            
+            // For this implementation, we'll assume we're working with a futures order
+            std::string endpoint = "/fapi/v1/order";
+            std::string params = "orderId=" + order_id;
+            
+            // Make the API call to cancel the order
+            json response = makeApiCall(endpoint, params, true, "DELETE");
+            
+            // Check if the cancellation was successful
+            if (response.contains("status")) {
+                std::string status = response["status"].get<std::string>();
+                return (status == "CANCELED");
+            }
+            
+            return false;
+        } catch (const std::exception& e) {
+            std::cerr << "Error cancelling Binance order: " << e.what() << std::endl;
+            return false;
+        }
     }
     
     OrderStatus getOrderStatus(const std::string& order_id) override {
-        // Implementation would go here
-        return OrderStatus::FILLED;
+        try {
+            // We need the symbol for Binance API, but it's not provided in the parameter
+            // In a real implementation, you would need to store a mapping of order_id to symbol
+            // or retrieve the symbol from the exchange
+            
+            // For this implementation, we'll assume we're working with a futures order
+            std::string endpoint = "/fapi/v1/order";
+            std::string params = "orderId=" + order_id;
+            
+            // Make the API call to get the order status
+            json response = makeApiCall(endpoint, params, true);
+            
+            // Map Binance status to our internal status
+            if (response.contains("status")) {
+                std::string status = response["status"].get<std::string>();
+                
+                if (status == "NEW" || status == "PARTIALLY_FILLED") {
+                    return OrderStatus::NEW;
+                } else if (status == "FILLED") {
+                    return OrderStatus::FILLED;
+                } else if (status == "CANCELED" || status == "EXPIRED" || status == "REJECTED") {
+                    return OrderStatus::CANCELED;
+                } else {
+                    return OrderStatus::REJECTED;
+                }
+            }
+            
+            return OrderStatus::REJECTED;
+        } catch (const std::exception& e) {
+            std::cerr << "Error getting Binance order status: " << e.what() << std::endl;
+            return OrderStatus::REJECTED;
+        }
     }
     
     std::vector<Trade> getRecentTrades(const std::string& symbol, int limit = 100) override {
-        // Implementation would go here
-        return std::vector<Trade>();
+        std::vector<Trade> trades;
+        
+        try {
+            // Determine if this is a spot or futures symbol
+            bool is_futures = symbol.find("PERP") != std::string::npos || 
+                             symbol.find("USDT_PERP") != std::string::npos;
+            
+            std::string endpoint;
+            if (is_futures) {
+                endpoint = "/fapi/v1/trades";
+            } else {
+                endpoint = "/api/v3/trades";
+            }
+            
+            std::string params = "symbol=" + symbol + "&limit=" + std::to_string(limit);
+            
+            // Make the API call
+            json response = makeApiCall(endpoint, params, false);
+            
+            if (response.is_array()) {
+                for (const auto& trade_data : response) {
+                    Trade trade;
+                    trade.symbol = symbol;
+                    trade.price = std::stod(trade_data["price"].get<std::string>());
+                    trade.amount = std::stod(trade_data["qty"].get<std::string>());
+                    trade.side = trade_data["isBuyerMaker"].get<bool>() ? "sell" : "buy";
+                    
+                    // Convert timestamp to system_clock::time_point
+                    int64_t ts = trade_data["time"].get<int64_t>();
+                    trade.timestamp = std::chrono::system_clock::from_time_t(ts / 1000);
+                    
+                    trade.trade_id = std::to_string(trade_data["id"].get<int64_t>());
+                    trades.push_back(trade);
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching Binance recent trades: " << e.what() << std::endl;
+        }
+        
+        return trades;
     }
     
     std::vector<Candle> getCandles(const std::string& symbol, 
                                  const std::string& interval,
                                  const std::chrono::system_clock::time_point& start,
                                  const std::chrono::system_clock::time_point& end) override {
-        // Implementation would go here
-        return std::vector<Candle>();
+        std::vector<Candle> candles;
+        
+        try {
+            // Determine if this is a spot or futures symbol
+            bool is_futures = symbol.find("PERP") != std::string::npos || 
+                             symbol.find("USDT_PERP") != std::string::npos;
+            
+            std::string endpoint;
+            if (is_futures) {
+                endpoint = "/fapi/v1/klines";
+            } else {
+                endpoint = "/api/v3/klines";
+            }
+            
+            // Convert time points to timestamps in milliseconds
+            int64_t start_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                start.time_since_epoch()).count();
+            int64_t end_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                end.time_since_epoch()).count();
+            
+            std::string params = "symbol=" + symbol + 
+                               "&interval=" + interval + 
+                               "&startTime=" + std::to_string(start_ts) + 
+                               "&endTime=" + std::to_string(end_ts) + 
+                               "&limit=1000"; // Maximum allowed by Binance
+            
+            // Make the API call
+            json response = makeApiCall(endpoint, params, false);
+            
+            if (response.is_array()) {
+                for (const auto& candle_data : response) {
+                    Candle candle;
+                    candle.symbol = symbol;
+                    
+                    // Binance returns [open_time, open, high, low, close, volume, close_time, ...]
+                    int64_t open_ts = candle_data[0].get<int64_t>();
+                    int64_t close_ts = candle_data[6].get<int64_t>();
+                    
+                    candle.open_time = std::chrono::system_clock::from_time_t(open_ts / 1000);
+                    candle.close_time = std::chrono::system_clock::from_time_t(close_ts / 1000);
+                    
+                    candle.open = std::stod(candle_data[1].get<std::string>());
+                    candle.high = std::stod(candle_data[2].get<std::string>());
+                    candle.low = std::stod(candle_data[3].get<std::string>());
+                    candle.close = std::stod(candle_data[4].get<std::string>());
+                    candle.volume = std::stod(candle_data[5].get<std::string>());
+                    candle.trades = candle_data[8].get<int>();
+                    
+                    candles.push_back(candle);
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching Binance candles: " << e.what() << std::endl;
+        }
+        
+        return candles;
     }
     
     bool isConnected() override {
-        // Implementation would go here
-        return true;
+        try {
+            // Make a simple API call to test connectivity
+            std::string endpoint = "/api/v3/ping";
+            makeApiCall(endpoint);
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "Binance connection check failed: " << e.what() << std::endl;
+            return false;
+        }
     }
     
     bool reconnect() override {
-        // Implementation would go here
-        return true;
+        try {
+            // Try up to 3 times with a short delay between attempts
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                if (isConnected()) {
+                    return true;
+                }
+                
+                std::cerr << "Binance reconnect attempt " << attempt << " failed, retrying..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            
+            std::cerr << "Failed to reconnect to Binance after 3 attempts" << std::endl;
+            return false;
+        } catch (const std::exception& e) {
+            std::cerr << "Binance reconnection failed: " << e.what() << std::endl;
+            return false;
+        }
     }
 
 private:
@@ -300,7 +557,7 @@ private:
     }
     
     // Make API call to Binance
-    json makeApiCall(const std::string& endpoint, std::string params = "", bool is_private = false) {
+    json makeApiCall(const std::string& endpoint, std::string params = "", bool is_private = false, const std::string& method = "GET") {
         CURL* curl = curl_easy_init();
         std::string response_string;
         std::string url = base_url_ + endpoint;
@@ -342,6 +599,8 @@ private:
             headers = curl_slist_append(headers, ("X-MBX-APIKEY: " + api_key_).c_str());
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         }
+        
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
         
         CURLcode res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);

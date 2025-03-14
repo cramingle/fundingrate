@@ -162,22 +162,29 @@ bool KuCoinExchange::reconnect() {
         // Re-initialize CURL
         curl_global_init(CURL_GLOBAL_ALL);
         
-        // Test connection by making a simple API call
-        std::string endpoint = "/api/v1/timestamp";
-        json response = makeApiCall(endpoint, "", false);
-        
-        if (response.contains("code") && response["code"].get<int>() == 200000) {
-            std::cout << "Successfully reconnected to KuCoin" << std::endl;
-            
-            // Update fee structure after reconnection
-            updateFeeStructure();
-            return true;
-        } else {
-            std::cerr << "Failed to reconnect to KuCoin: Unexpected response" << std::endl;
-            return false;
+        // Try up to 3 times with a short delay between attempts
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                // Test connection by making a simple API call
+                std::string endpoint = "/api/v1/timestamp";
+                json response = makeApiCall(endpoint, "", false);
+                
+                if (response.contains("code") && response["code"].get<int>() == 200000) {
+                    std::cout << "Successfully reconnected to KuCoin" << std::endl;
+                    return true;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "KuCoin reconnect attempt " << attempt << " failed: " << e.what() << std::endl;
+                if (attempt < 3) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            }
         }
+        
+        std::cerr << "Failed to reconnect to KuCoin after 3 attempts" << std::endl;
+        return false;
     } catch (const std::exception& e) {
-        std::cerr << "Failed to reconnect to KuCoin: " << e.what() << std::endl;
+        std::cerr << "KuCoin reconnect failed: " << e.what() << std::endl;
         return false;
     }
 }
@@ -246,6 +253,13 @@ json KuCoinExchange::makeApiCall(const std::string& endpoint,
     // This is necessary because KuCoin's SSL certificates might not be properly validated
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    
+    // Set connection timeout to prevent hanging
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    
+    // Enable verbose output for debugging
+    // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
     
     // Set request method
     if (method != "GET") {
