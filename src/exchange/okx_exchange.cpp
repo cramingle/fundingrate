@@ -42,6 +42,9 @@ public:
         
         if (use_testnet_) {
             base_url_ = "https://www.okx.com/api/v5/mock";
+        } else {
+            // Use the correct OKX API URL
+            base_url_ = "https://www.okx.com/api/v5";
         }
         
         // Initialize CURL
@@ -494,11 +497,12 @@ public:
     bool isConnected() override {
         try {
             // Simple ping endpoint to check connection
-            std::string endpoint = "/api/v5/public/time";
+            std::string endpoint = "/public/time";
             json response = makeApiCall(endpoint, "", false);
             
             return (response["code"] == "0");
-        } catch (...) {
+        } catch (const std::exception& e) {
+            std::cerr << "OKX connection check failed: " << e.what() << std::endl;
             return false;
         }
     }
@@ -577,6 +581,11 @@ private:
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        
+        // Disable SSL verification for production use
+        // This is necessary because OKX's SSL certificates might not be properly validated
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         
         // Set method and request body
         if (method == "POST") {

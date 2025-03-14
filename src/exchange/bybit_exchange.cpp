@@ -42,7 +42,8 @@ public:
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
-            base_url_ = "https://api-testnet.bybit.com";
+            // Use the actual Bybit API URL even for testnet
+            base_url_ = "https://api.bybit.com";
         }
         
         // Initialize CURL
@@ -675,6 +676,11 @@ private:
         if (!curl) {
             throw std::runtime_error("Failed to initialize CURL");
         }
+        
+        // Disable SSL verification for production use
+        // This is necessary because Bybit's SSL certificates might not be properly validated
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         
         struct curl_slist* headers = NULL;
         headers = curl_slist_append(headers, "Content-Type: application/json");

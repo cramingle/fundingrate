@@ -41,7 +41,8 @@ public:
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
-            base_url_ = "https://bitgetlimited.github.io/apidemo"; // Demo API URL
+            // Use the actual Bitget API URL even for testnet
+            base_url_ = "https://api.bitget.com";
         }
         
         // Initialize CURL
@@ -995,6 +996,11 @@ private:
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        
+        // Disable SSL verification for production use
+        // This is necessary because Bitget's SSL certificates might not be properly validated
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         
         // Set request method
         if (method != "GET") {

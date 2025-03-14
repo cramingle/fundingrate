@@ -363,29 +363,91 @@ private:
             // Get trading fee information - timestamp and signature will be added by makeApiCall
             json fee_info = makeApiCall("/api/v3/account", "", true);
             
-            // Parse maker/taker fees
-            fee_structure_.maker_fee = std::stod(fee_info["makerCommission"].get<std::string>()) / 10000.0;
-            fee_structure_.taker_fee = std::stod(fee_info["takerCommission"].get<std::string>()) / 10000.0;
-            
-            // Parse VIP tier info 
-            fee_structure_.fee_tier = fee_info["commissionRates"]["tier"].get<int>();
-            fee_structure_.volume_30d_usd = fee_info["commissionRates"]["30dVolume"].get<double>();
-            
-            // Symbol-specific fees
-            json symbol_fees = makeApiCall("/sapi/v1/asset/tradeFee", "", true);
-            for (const auto& symbol_fee : symbol_fees) {
-                std::string symbol = symbol_fee["symbol"];
-                double maker = std::stod(symbol_fee["makerCommission"].get<std::string>());
-                double taker = std::stod(symbol_fee["takerCommission"].get<std::string>());
-                symbol_fees_[symbol] = std::make_pair(maker, taker);
+            // Parse maker/taker fees - handle different data types
+            if (fee_info.contains("makerCommission")) {
+                if (fee_info["makerCommission"].is_string()) {
+                    fee_structure_.maker_fee = std::stod(fee_info["makerCommission"].get<std::string>()) / 10000.0;
+                } else if (fee_info["makerCommission"].is_number()) {
+                    fee_structure_.maker_fee = fee_info["makerCommission"].get<double>() / 10000.0;
+                } else {
+                    fee_structure_.maker_fee = 0.001; // Default value if not available
+                }
+            } else {
+                fee_structure_.maker_fee = 0.001; // Default value if not available
             }
             
-            // Get withdrawal fees
-            json coins_info = makeApiCall("/sapi/v1/capital/config/getall", "", true);
-            for (const auto& coin : coins_info) {
-                std::string currency = coin["coin"];
-                double withdraw_fee = std::stod(coin["withdrawFee"].get<std::string>());
-                fee_structure_.withdrawal_fees[currency] = withdraw_fee;
+            if (fee_info.contains("takerCommission")) {
+                if (fee_info["takerCommission"].is_string()) {
+                    fee_structure_.taker_fee = std::stod(fee_info["takerCommission"].get<std::string>()) / 10000.0;
+                } else if (fee_info["takerCommission"].is_number()) {
+                    fee_structure_.taker_fee = fee_info["takerCommission"].get<double>() / 10000.0;
+                } else {
+                    fee_structure_.taker_fee = 0.001; // Default value if not available
+                }
+            } else {
+                fee_structure_.taker_fee = 0.001; // Default value if not available
+            }
+            
+            // Parse VIP tier info - handle missing or null values
+            if (fee_info.contains("commissionRates") && !fee_info["commissionRates"].is_null()) {
+                auto& rates = fee_info["commissionRates"];
+                if (rates.contains("tier") && !rates["tier"].is_null()) {
+                    fee_structure_.fee_tier = rates["tier"].is_string() ? 
+                        std::stoi(rates["tier"].get<std::string>()) : rates["tier"].get<int>();
+                } else {
+                    fee_structure_.fee_tier = 0; // Default tier
+                }
+                
+                if (rates.contains("30dVolume") && !rates["30dVolume"].is_null()) {
+                    fee_structure_.volume_30d_usd = rates["30dVolume"].is_string() ? 
+                        std::stod(rates["30dVolume"].get<std::string>()) : rates["30dVolume"].get<double>();
+                } else {
+                    fee_structure_.volume_30d_usd = 0.0; // Default volume
+                }
+            } else {
+                fee_structure_.fee_tier = 0;
+                fee_structure_.volume_30d_usd = 0.0;
+            }
+            
+            // Symbol-specific fees - handle errors gracefully
+            try {
+                json symbol_fees = makeApiCall("/sapi/v1/asset/tradeFee", "", true);
+                for (const auto& symbol_fee : symbol_fees) {
+                    if (symbol_fee.contains("symbol") && 
+                        symbol_fee.contains("makerCommission") && 
+                        symbol_fee.contains("takerCommission")) {
+                        
+                        std::string symbol = symbol_fee["symbol"];
+                        double maker = symbol_fee["makerCommission"].is_string() ? 
+                            std::stod(symbol_fee["makerCommission"].get<std::string>()) : 
+                            symbol_fee["makerCommission"].get<double>();
+                        
+                        double taker = symbol_fee["takerCommission"].is_string() ? 
+                            std::stod(symbol_fee["takerCommission"].get<std::string>()) : 
+                            symbol_fee["takerCommission"].get<double>();
+                        
+                        symbol_fees_[symbol] = std::make_pair(maker, taker);
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error fetching symbol-specific fees: " << e.what() << std::endl;
+            }
+            
+            // Get withdrawal fees - handle errors gracefully
+            try {
+                json coins_info = makeApiCall("/sapi/v1/capital/config/getall", "", true);
+                for (const auto& coin : coins_info) {
+                    if (coin.contains("coin") && coin.contains("withdrawFee")) {
+                        std::string currency = coin["coin"];
+                        double withdraw_fee = coin["withdrawFee"].is_string() ? 
+                            std::stod(coin["withdrawFee"].get<std::string>()) : 
+                            coin["withdrawFee"].get<double>();
+                        
+                        fee_structure_.withdrawal_fees[currency] = withdraw_fee;
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error fetching withdrawal fees: " << e.what() << std::endl;
             }
             
             // Different market types might have different fee structures
@@ -399,7 +461,6 @@ private:
             
             std::cout << "Updated Binance fee structure, maker: " << fee_structure_.maker_fee 
                       << ", taker: " << fee_structure_.taker_fee << std::endl;
-                      
         } catch (const std::exception& e) {
             std::cerr << "Error updating fee structure: " << e.what() << std::endl;
             std::cerr << "Using default fee structure instead" << std::endl;
