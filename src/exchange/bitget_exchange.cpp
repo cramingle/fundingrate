@@ -350,7 +350,8 @@ public:
                 throw std::runtime_error("Funding rate only available for UMCBL contracts");
             }
             
-            std::string endpoint = "/api/mix/v1/market/funding-time?symbol=" + modified_symbol;
+            // Use the ticker endpoint which contains funding rate information
+            std::string endpoint = "/api/mix/v1/market/ticker?symbol=" + modified_symbol;
             json response = makeApiCall(endpoint, "", false);
             
             if (response["code"] == "00000" && response.contains("data")) {
@@ -366,23 +367,18 @@ public:
                     std::cout << "No funding rate found for " << modified_symbol << ", using default 0.0" << std::endl;
                 }
                 
-                // Parse next funding time
-                if (data.contains("nextFundingTime")) {
-                    std::string next_time_str = data["nextFundingTime"].get<std::string>();
-                    int64_t next_time = std::stoll(next_time_str);
-                    funding.next_payment = std::chrono::system_clock::from_time_t(next_time / 1000);
-                } else {
-                    // Default to 8 hours from now
-                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                }
+                // Set next funding time (Bitget has 8-hour funding intervals)
+                // Since we don't have the exact next funding time from this endpoint,
+                // we'll estimate it based on the current time
+                auto now = std::chrono::system_clock::now();
+                auto hours_since_epoch = std::chrono::duration_cast<std::chrono::hours>(now.time_since_epoch()).count();
+                int hours_until_next = (8 - (hours_since_epoch % 8)) % 8;
+                if (hours_until_next == 0) hours_until_next = 8; // If we're exactly at a funding time
                 
-                // Parse predicted rate if available
-                if (data.contains("predictedRate")) {
-                    std::string predicted_rate_str = data["predictedRate"].get<std::string>();
-                    funding.predicted_rate = std::stod(predicted_rate_str);
-                } else {
-                    funding.predicted_rate = funding.rate; // Use current rate as prediction if not available
-                }
+                funding.next_payment = now + std::chrono::hours(hours_until_next);
+                
+                // Use current rate as predicted rate
+                funding.predicted_rate = funding.rate;
                 
                 // Bitget has 8-hour funding intervals
                 funding.payment_interval = std::chrono::hours(8);
