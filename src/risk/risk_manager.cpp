@@ -122,6 +122,11 @@ bool RiskManager::shouldReducePosition(const ArbitragePosition& position, double
         return true;
     }
     
+    // Check if the current spread is approaching the max allowable spread from the opportunity
+    if (position.current_spread > position.opportunity.max_allowable_spread * 0.75) {
+        return true;
+    }
+    
     // Check if we're approaching our stop loss
     double loss_pct = 0.0;
     if (position.unrealized_pnl < 0) {

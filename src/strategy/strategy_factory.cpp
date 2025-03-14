@@ -92,67 +92,42 @@ std::unique_ptr<ArbitrageStrategy> createSameExchangeSpotPerpStrategy(
                       "min_funding_rate=" + std::to_string(min_funding_rate) + ", " +
                       "min_expected_profit=" + std::to_string(min_expected_profit));
     
-    // Create individual strategies for each exchange
     std::vector<std::unique_ptr<ArbitrageStrategy>> strategies;
     
     for (const auto& exchange : exchanges) {
-        // Skip exchanges that don't support both spot and perpetual markets
         try {
-            auto spot_instruments = exchange->getAvailableInstruments(MarketType::SPOT);
-            auto perp_instruments = exchange->getAvailableInstruments(MarketType::PERPETUAL);
+            auto strategy = std::make_unique<SameExchangeSpotPerpStrategy>(exchange);
             
-            if (spot_instruments.empty() || perp_instruments.empty()) {
-                logStrategyFactory("Skipping exchange " + exchange->getName() + 
-                                  " for SameExchangeSpotPerpStrategy: missing required market types");
-                continue;
-            }
-        } catch (const std::exception& e) {
-            logStrategyFactory("Error checking market types for " + exchange->getName() + 
-                              ": " + e.what(), true);
-            continue;
-        }
-        
-        // Create a strategy for this exchange with retry mechanism
-        try {
-            auto create_strategy = [&]() {
-                auto strategy = std::make_unique<SameExchangeSpotPerpStrategy>(exchange);
-                
-                // Configure strategy parameters
-                strategy->setMinFundingRate(min_funding_rate);
-                strategy->setMinExpectedProfit(min_expected_profit);
-                
-                return strategy;
-            };
+            // Set the minimum funding rate and expected profit
+            strategy->setMinFundingRate(min_funding_rate);
+            strategy->setMinExpectedProfit(min_expected_profit);
             
-            auto strategy = retryOperation("Create SameExchangeSpotPerpStrategy for " + 
-                                         exchange->getName(), create_strategy);
-            
-            strategies.push_back(std::move(strategy));
-            logStrategyFactory("Successfully created SameExchangeSpotPerpStrategy for " + 
+            logStrategyFactory("StrategyFactory: Successfully created SameExchangeSpotPerpStrategy for " + 
                               exchange->getName() + " with min_funding_rate=" + 
                               std::to_string(min_funding_rate) + ", min_expected_profit=" + 
                               std::to_string(min_expected_profit));
+            
+            strategies.push_back(std::move(strategy));
         } catch (const std::exception& e) {
-            logStrategyFactory("Failed to create SameExchangeSpotPerpStrategy for " + 
+            logStrategyFactory("StrategyFactory: Failed to create SameExchangeSpotPerpStrategy for " + 
                               exchange->getName() + ": " + e.what(), true);
         }
     }
     
     if (strategies.empty()) {
-        logStrategyFactory("No valid SameExchangeSpotPerpStrategy instances created", true);
+        logStrategyFactory("StrategyFactory: No valid SameExchangeSpotPerpStrategy instances created", true);
         return nullptr;
     }
     
-    // If only one strategy, return it directly
     if (strategies.size() == 1) {
         logStrategyFactory("Returning single SameExchangeSpotPerpStrategy for " + 
                           exchanges[0]->getName());
         return std::move(strategies[0]);
     }
     
-    // Otherwise, create a composite strategy
-    logStrategyFactory("Creating composite strategy with " + 
+    logStrategyFactory("StrategyFactory: Creating composite strategy with " + 
                       std::to_string(strategies.size()) + " SameExchangeSpotPerpStrategy instances");
+    
     return std::make_unique<CompositeStrategy>(std::move(strategies));
 }
 
@@ -172,78 +147,43 @@ std::unique_ptr<ArbitrageStrategy> createCrossExchangePerpStrategy(
                       "min_funding_rate=" + std::to_string(min_funding_rate) + ", " +
                       "min_expected_profit=" + std::to_string(min_expected_profit));
     
-    // Create strategies for all pairs of exchanges
     std::vector<std::unique_ptr<ArbitrageStrategy>> strategies;
     
-    // Track exchanges that support perpetual markets
-    std::vector<std::shared_ptr<ExchangeInterface>> valid_exchanges;
-    for (const auto& exchange : exchanges) {
-        try {
-            auto perp_instruments = exchange->getAvailableInstruments(MarketType::PERPETUAL);
-            if (!perp_instruments.empty()) {
-                valid_exchanges.push_back(exchange);
-            } else {
-                logStrategyFactory("Skipping exchange " + exchange->getName() + 
-                                  " for CrossExchangePerpStrategy: no perpetual instruments");
-            }
-        } catch (const std::exception& e) {
-            logStrategyFactory("Error checking perpetual instruments for " + 
-                              exchange->getName() + ": " + e.what(), true);
-        }
-    }
-    
-    if (valid_exchanges.size() < 2) {
-        logStrategyFactory("Need at least 2 exchanges with perpetual markets for CrossExchangePerpStrategy", true);
-        return nullptr;
-    }
-    
-    // Create strategies for all pairs of valid exchanges
-    for (size_t i = 0; i < valid_exchanges.size(); ++i) {
-        for (size_t j = i + 1; j < valid_exchanges.size(); ++j) {
+    for (size_t i = 0; i < exchanges.size(); ++i) {
+        for (size_t j = i + 1; j < exchanges.size(); ++j) {
             try {
-                auto create_strategy = [&]() {
-                    auto strategy = std::make_unique<CrossExchangePerpStrategy>(
-                        valid_exchanges[i], valid_exchanges[j]);
-                    
-                    // Configure strategy parameters
-                    strategy->setMinFundingRate(min_funding_rate);
-                    strategy->setMinExpectedProfit(min_expected_profit);
-                    
-                    return strategy;
-                };
+                auto strategy = std::make_unique<CrossExchangePerpStrategy>(exchanges[i], exchanges[j]);
                 
-                auto strategy = retryOperation("Create CrossExchangePerpStrategy for " + 
-                                             valid_exchanges[i]->getName() + " and " + 
-                                             valid_exchanges[j]->getName(), create_strategy);
+                // Set the minimum funding rate and expected profit
+                strategy->setMinFundingRate(min_funding_rate);
+                strategy->setMinExpectedProfit(min_expected_profit);
+                
+                logStrategyFactory("StrategyFactory: Successfully created CrossExchangePerpStrategy for " + 
+                                  exchanges[i]->getName() + " and " + exchanges[j]->getName() + 
+                                  " with min_funding_rate=" + std::to_string(min_funding_rate) + 
+                                  ", min_expected_profit=" + std::to_string(min_expected_profit));
                 
                 strategies.push_back(std::move(strategy));
-                logStrategyFactory("Successfully created CrossExchangePerpStrategy for " + 
-                                  valid_exchanges[i]->getName() + " and " + 
-                                  valid_exchanges[j]->getName() + " with min_funding_rate=" + 
-                                  std::to_string(min_funding_rate) + ", min_expected_profit=" + 
-                                  std::to_string(min_expected_profit));
             } catch (const std::exception& e) {
-                logStrategyFactory("Failed to create CrossExchangePerpStrategy for " + 
-                                  valid_exchanges[i]->getName() + " and " + 
-                                  valid_exchanges[j]->getName() + ": " + e.what(), true);
+                logStrategyFactory("StrategyFactory: Failed to create CrossExchangePerpStrategy for " + 
+                                  exchanges[i]->getName() + " and " + exchanges[j]->getName() + ": " + e.what(), true);
             }
         }
     }
     
     if (strategies.empty()) {
-        logStrategyFactory("No valid CrossExchangePerpStrategy instances created", true);
+        logStrategyFactory("StrategyFactory: No valid CrossExchangePerpStrategy instances created", true);
         return nullptr;
     }
     
-    // If only one strategy, return it directly
     if (strategies.size() == 1) {
         logStrategyFactory("Returning single CrossExchangePerpStrategy");
         return std::move(strategies[0]);
     }
     
-    // Otherwise, create a composite strategy
-    logStrategyFactory("Creating composite strategy with " + 
+    logStrategyFactory("StrategyFactory: Creating composite strategy with " + 
                       std::to_string(strategies.size()) + " CrossExchangePerpStrategy instances");
+    
     return std::make_unique<CompositeStrategy>(std::move(strategies));
 }
 
@@ -263,93 +203,46 @@ std::unique_ptr<ArbitrageStrategy> createCrossExchangeSpotPerpStrategy(
                       "min_funding_rate=" + std::to_string(min_funding_rate) + ", " +
                       "min_expected_profit=" + std::to_string(min_expected_profit));
     
-    // Track exchanges that support spot and perpetual markets
-    std::vector<std::shared_ptr<ExchangeInterface>> spot_exchanges;
-    std::vector<std::shared_ptr<ExchangeInterface>> perp_exchanges;
-    
-    for (const auto& exchange : exchanges) {
-        try {
-            auto spot_instruments = exchange->getAvailableInstruments(MarketType::SPOT);
-            if (!spot_instruments.empty()) {
-                spot_exchanges.push_back(exchange);
-            }
-        } catch (const std::exception& e) {
-            logStrategyFactory("Error checking spot instruments for " + 
-                              exchange->getName() + ": " + e.what(), true);
-        }
-        
-        try {
-            auto perp_instruments = exchange->getAvailableInstruments(MarketType::PERPETUAL);
-            if (!perp_instruments.empty()) {
-                perp_exchanges.push_back(exchange);
-            }
-        } catch (const std::exception& e) {
-            logStrategyFactory("Error checking perpetual instruments for " + 
-                              exchange->getName() + ": " + e.what(), true);
-        }
-    }
-    
-    if (spot_exchanges.empty()) {
-        logStrategyFactory("No exchanges with spot markets found for CrossExchangeSpotPerpStrategy", true);
-        return nullptr;
-    }
-    
-    if (perp_exchanges.empty()) {
-        logStrategyFactory("No exchanges with perpetual markets found for CrossExchangeSpotPerpStrategy", true);
-        return nullptr;
-    }
-    
-    // Create strategies for all pairs of spot and perp exchanges
     std::vector<std::unique_ptr<ArbitrageStrategy>> strategies;
     
-    for (const auto& spot_exchange : spot_exchanges) {
-        for (const auto& perp_exchange : perp_exchanges) {
-            if (spot_exchange->getName() != perp_exchange->getName()) {
-                try {
-                    auto create_strategy = [&]() {
-                        auto strategy = std::make_unique<CrossExchangeSpotPerpStrategy>(
-                            spot_exchange, perp_exchange);
-                        
-                        // Configure strategy parameters
-                        strategy->setMinFundingRate(min_funding_rate);
-                        strategy->setMinExpectedProfit(min_expected_profit);
-                        
-                        return strategy;
-                    };
-                    
-                    auto strategy = retryOperation("Create CrossExchangeSpotPerpStrategy for " + 
-                                                 spot_exchange->getName() + " (spot) and " + 
-                                                 perp_exchange->getName() + " (perp)", create_strategy);
-                    
-                    strategies.push_back(std::move(strategy));
-                    logStrategyFactory("Successfully created CrossExchangeSpotPerpStrategy for " + 
-                                      spot_exchange->getName() + " (spot) and " + 
-                                      perp_exchange->getName() + " (perp) with min_funding_rate=" + 
-                                      std::to_string(min_funding_rate) + ", min_expected_profit=" + 
-                                      std::to_string(min_expected_profit));
-                } catch (const std::exception& e) {
-                    logStrategyFactory("Failed to create CrossExchangeSpotPerpStrategy for " + 
-                                      spot_exchange->getName() + " and " + 
-                                      perp_exchange->getName() + ": " + e.what(), true);
-                }
+    for (size_t i = 0; i < exchanges.size(); ++i) {
+        for (size_t j = 0; j < exchanges.size(); ++j) {
+            if (i == j) continue;
+            
+            try {
+                auto strategy = std::make_unique<CrossExchangeSpotPerpStrategy>(
+                    exchanges[i], exchanges[j]);
+                
+                // Set the minimum funding rate and expected profit
+                strategy->setMinFundingRate(min_funding_rate);
+                strategy->setMinExpectedProfit(min_expected_profit);
+                
+                logStrategyFactory("StrategyFactory: Successfully created CrossExchangeSpotPerpStrategy for " + 
+                                  exchanges[i]->getName() + " (spot) and " + exchanges[j]->getName() + " (perp) with min_funding_rate=" + 
+                                  std::to_string(min_funding_rate) + ", min_expected_profit=" + 
+                                  std::to_string(min_expected_profit));
+                
+                strategies.push_back(std::move(strategy));
+            } catch (const std::exception& e) {
+                logStrategyFactory("StrategyFactory: Failed to create CrossExchangeSpotPerpStrategy for " + 
+                                  exchanges[i]->getName() + " (spot) and " + exchanges[j]->getName() + " (perp): " + e.what(), true);
             }
         }
     }
     
     if (strategies.empty()) {
-        logStrategyFactory("No valid CrossExchangeSpotPerpStrategy instances created", true);
+        logStrategyFactory("StrategyFactory: No valid CrossExchangeSpotPerpStrategy instances created", true);
         return nullptr;
     }
     
-    // If only one strategy, return it directly
     if (strategies.size() == 1) {
         logStrategyFactory("Returning single CrossExchangeSpotPerpStrategy");
         return std::move(strategies[0]);
     }
     
-    // Otherwise, create a composite strategy
-    logStrategyFactory("Creating composite strategy with " + 
+    logStrategyFactory("StrategyFactory: Creating composite strategy with " + 
                       std::to_string(strategies.size()) + " CrossExchangeSpotPerpStrategy instances");
+    
     return std::make_unique<CompositeStrategy>(std::move(strategies));
 }
 
@@ -360,9 +253,9 @@ std::unique_ptr<ArbitrageStrategy> createStrategy(
     double min_funding_rate,
     double min_expected_profit) {
     
-    logStrategyFactory("Creating strategy of type '" + strategy_type + "' with min_funding_rate=" + 
-                      std::to_string(min_funding_rate) + ", min_expected_profit=" + 
-                      std::to_string(min_expected_profit));
+    logStrategyFactory("StrategyFactory: Creating strategy of type '" + strategy_type + 
+                      "' with min_funding_rate=" + std::to_string(min_funding_rate) + 
+                      ", min_expected_profit=" + std::to_string(min_expected_profit));
     
     if (strategy_type == "same_exchange_spot_perp") {
         return createSameExchangeSpotPerpStrategy(exchanges, min_funding_rate, min_expected_profit);
@@ -371,7 +264,7 @@ std::unique_ptr<ArbitrageStrategy> createStrategy(
     } else if (strategy_type == "cross_exchange_spot_perp") {
         return createCrossExchangeSpotPerpStrategy(exchanges, min_funding_rate, min_expected_profit);
     } else {
-        logStrategyFactory("Unknown strategy type: " + strategy_type, true);
+        logStrategyFactory("StrategyFactory: Unknown strategy type: " + strategy_type, true);
         return nullptr;
     }
 }
@@ -379,24 +272,27 @@ std::unique_ptr<ArbitrageStrategy> createStrategy(
 // Helper function to create all strategies from the configuration
 std::vector<std::unique_ptr<ArbitrageStrategy>> createAllStrategies(
     const BotConfig& config,
-    const std::map<std::string, std::shared_ptr<ExchangeInterface>>& exchanges) {
+    const std::map<std::string, std::shared_ptr<ExchangeInterface>>& exchange_map) {
     
-    logStrategyFactory("Creating all strategies from configuration with " + 
-                      std::to_string(exchanges.size()) + " exchanges and " +
+    logStrategyFactory("StrategyFactory: Creating all strategies from configuration with " + 
+                      std::to_string(exchange_map.size()) + " exchanges and " +
                       std::to_string(config.strategies.size()) + " strategy configs");
     
     std::vector<std::unique_ptr<ArbitrageStrategy>> strategies;
+    std::vector<std::shared_ptr<ExchangeInterface>> exchanges;
     
-    // Convert exchanges map to vector for strategy creation
-    std::vector<std::shared_ptr<ExchangeInterface>> exchange_vec;
-    for (const auto& [name, exchange] : exchanges) {
-        exchange_vec.push_back(exchange);
+    // Convert exchange map to vector
+    for (const auto& [name, exchange] : exchange_map) {
+        exchanges.push_back(exchange);
     }
     
     // Create strategies based on configuration
     for (const auto& strategy_config : config.strategies) {
-        std::string strategy_type;
+        double min_funding_rate = strategy_config.min_funding_rate;
+        double min_expected_profit = strategy_config.min_expected_profit;
         
+        // Convert enum to string
+        std::string strategy_type;
         switch (strategy_config.type) {
             case StrategyType::SAME_EXCHANGE_SPOT_PERP:
                 strategy_type = "same_exchange_spot_perp";
@@ -408,30 +304,30 @@ std::vector<std::unique_ptr<ArbitrageStrategy>> createAllStrategies(
                 strategy_type = "cross_exchange_spot_perp";
                 break;
             default:
-                logStrategyFactory("Unknown strategy type enum value: " + 
+                logStrategyFactory("StrategyFactory: Unknown strategy type enum value: " + 
                                   std::to_string(static_cast<int>(strategy_config.type)), true);
                 continue;
         }
         
-        // Create strategy with configuration parameters
         auto strategy = createStrategy(
             strategy_type, 
-            exchange_vec, 
-            strategy_config.min_funding_rate,
-            strategy_config.min_expected_profit
-        );
+            exchanges, 
+            min_funding_rate,
+            min_expected_profit);
         
         if (strategy) {
+            logStrategyFactory("StrategyFactory: Added " + strategy_type + 
+                              " strategy to the bot with min_funding_rate=" + std::to_string(min_funding_rate) + 
+                              ", min_expected_profit=" + std::to_string(min_expected_profit));
+            
             strategies.push_back(std::move(strategy));
-            logStrategyFactory("Added " + strategy_type + " strategy to the bot with min_funding_rate=" + 
-                              std::to_string(strategy_config.min_funding_rate) + ", min_expected_profit=" + 
-                              std::to_string(strategy_config.min_expected_profit));
         } else {
-            logStrategyFactory("Failed to create " + strategy_type + " strategy", true);
+            logStrategyFactory("StrategyFactory: Failed to create " + strategy_type + " strategy", true);
         }
     }
     
-    logStrategyFactory("Created " + std::to_string(strategies.size()) + " strategies in total");
+    logStrategyFactory("StrategyFactory: Created " + std::to_string(strategies.size()) + " strategies in total");
+    
     return strategies;
 }
 

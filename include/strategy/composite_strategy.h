@@ -11,7 +11,13 @@ namespace funding {
 class CompositeStrategy : public ArbitrageStrategy {
 public:
     CompositeStrategy(std::vector<std::unique_ptr<ArbitrageStrategy>> strategies)
-        : strategies_(std::move(strategies)) {}
+        : strategies_(std::move(strategies)) {
+        // If we have strategies, initialize our min values from the first one
+        if (!strategies_.empty()) {
+            min_funding_rate_ = strategies_[0]->getMinFundingRate();
+            min_expected_profit_ = strategies_[0]->getMinExpectedProfit();
+        }
+    }
     
     std::vector<ArbitrageOpportunity> findOpportunities() override {
         std::vector<ArbitrageOpportunity> all_opportunities;
@@ -126,8 +132,34 @@ public:
         }
     }
     
+    // Override the getter methods to ensure they return the correct values
+    double getMinFundingRate() const override {
+        return min_funding_rate_;
+    }
+    
+    double getMinExpectedProfit() const override {
+        return min_expected_profit_;
+    }
+    
+    // Override the setter methods to propagate values to all strategies
+    void setMinFundingRate(double rate) override {
+        min_funding_rate_ = rate;
+        for (const auto& strategy : strategies_) {
+            strategy->setMinFundingRate(rate);
+        }
+    }
+    
+    void setMinExpectedProfit(double profit) override {
+        min_expected_profit_ = profit;
+        for (const auto& strategy : strategies_) {
+            strategy->setMinExpectedProfit(profit);
+        }
+    }
+    
 private:
     std::vector<std::unique_ptr<ArbitrageStrategy>> strategies_;
+    double min_funding_rate_;
+    double min_expected_profit_;
 };
 
 } // namespace funding 

@@ -34,8 +34,57 @@ bool ConfigManager::loadConfig() {
             return false;
         }
         
-        // In a real implementation, we would parse JSON here
-        // For this example, we'll just use default values
+        // Parse JSON
+        nlohmann::json json_config;
+        try {
+            file >> json_config;
+        } catch (const nlohmann::json::parse_error& e) {
+            std::cerr << "Failed to parse config file: " << e.what() << std::endl;
+            return false;
+        }
+        
+        // Load general settings
+        if (json_config.contains("bot_name")) {
+            config_.bot_name = json_config["bot_name"];
+        }
+        if (json_config.contains("simulation_mode")) {
+            config_.simulation_mode = json_config["simulation_mode"];
+        }
+        if (json_config.contains("log_level")) {
+            config_.log_level = json_config["log_level"];
+        }
+        if (json_config.contains("log_file")) {
+            config_.log_file = json_config["log_file"];
+        }
+        
+        // Load risk config
+        if (json_config.contains("risk_config")) {
+            auto& risk = json_config["risk_config"];
+            if (risk.contains("max_position_size_usd")) {
+                config_.risk_config.max_position_size_usd = risk["max_position_size_usd"];
+            }
+            if (risk.contains("max_total_position_usd")) {
+                config_.risk_config.max_total_position_usd = risk["max_total_position_usd"];
+            }
+            if (risk.contains("max_position_per_exchange")) {
+                config_.risk_config.max_position_per_exchange = risk["max_position_per_exchange"];
+            }
+            if (risk.contains("max_price_divergence_pct")) {
+                config_.risk_config.max_price_divergence_pct = risk["max_price_divergence_pct"];
+            }
+            if (risk.contains("target_profit_pct")) {
+                config_.risk_config.target_profit_pct = risk["target_profit_pct"];
+            }
+            if (risk.contains("stop_loss_pct")) {
+                config_.risk_config.stop_loss_pct = risk["stop_loss_pct"];
+            }
+            if (risk.contains("dynamic_position_sizing")) {
+                config_.risk_config.dynamic_position_sizing = risk["dynamic_position_sizing"];
+            }
+            if (risk.contains("min_liquidity_depth")) {
+                config_.risk_config.min_liquidity_depth = risk["min_liquidity_depth"];
+            }
+        }
         
         return true;
     } catch (const std::exception& e) {

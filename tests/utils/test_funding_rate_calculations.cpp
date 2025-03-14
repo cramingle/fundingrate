@@ -21,7 +21,9 @@ double calculateProfitFromFunding(double funding_rate,
     double annualized_rate = annualizeFundingRate(funding_rate, interval);
     
     // Calculate profit after transaction costs and entry spread
-    return annualized_rate - std::abs(entry_spread_pct) - transaction_cost_pct;
+    // We take the absolute value of the annualized rate since we can profit from both positive and negative rates
+    // by taking the appropriate position (long or short)
+    return std::abs(annualized_rate) - std::abs(entry_spread_pct) - transaction_cost_pct;
 }
 
 // Helper to estimate how many funding periods to break even

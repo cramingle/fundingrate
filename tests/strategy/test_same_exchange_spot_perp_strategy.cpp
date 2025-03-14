@@ -17,6 +17,13 @@ protected:
         ON_CALL(*mock_exchange_, getName())
             .WillByDefault(::testing::Return("TestExchange"));
         
+        // Set up mock account balance
+        AccountBalance balance;
+        balance.available["BTC"] = 1.0;
+        balance.available["USDT"] = 50000.0;
+        ON_CALL(*mock_exchange_, getAccountBalance())
+            .WillByDefault(::testing::Return(balance));
+        
         // Set up strategy with the mock exchange
         strategy_ = std::make_unique<SameExchangeSpotPerpStrategy>(mock_exchange_);
         
