@@ -1,54 +1,389 @@
 #!/bin/bash
 # Build and run script for Funding Rate Arbitrage Bot
-# Usage: ./run [config_file]
+# Usage: ./run [config_file] [--test-api-only]
 
 # Set default config file path
 CONFIG_FILE="config/bot_config.json"
+TEST_API_ONLY=false
 
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
+GRAY='\033[0;90m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Parse command line arguments
-if [ $# -gt 0 ]; then
-    CONFIG_FILE="$1"
-fi
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --test-api-only)
+            TEST_API_ONLY=true
+            shift
+            ;;
+        *)
+            CONFIG_FILE="$1"
+            shift
+            ;;
+    esac
+done
 
-# Display header
-echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}   Funding Rate Arbitrage Bot Builder   ${NC}"
-echo -e "${GREEN}=========================================${NC}"
+# Function to print header
+print_header() {
+    echo -e "\n${BOLD}${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
+    echo -e "${BOLD}${BLUE}┃     ${GREEN}Funding Rate Arbitrage Bot Builder     ${BLUE}┃${NC}"
+    echo -e "${BOLD}${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}\n"
+}
+
+# Function to test API connectivity using curl
+test_exchange_connectivity() {
+    local config="$1"
+    
+    echo -e "\n${BOLD}${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
+    echo -e "${BOLD}${BLUE}┃       ${GREEN}Testing Exchange API Connectivity       ${BLUE}┃${NC}"
+    echo -e "${BOLD}${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
+    
+    echo -e "${YELLOW}→ Using config file: ${config}${NC}"
+    
+    # Check if config file exists
+    if [ ! -f "$config" ]; then
+        echo -e "${RED}✖ Config file not found: ${config}${NC}"
+        return 1
+    fi
+    
+    # Extract exchange information using more reliable method
+    echo -e "${CYAN}→ Extracting exchange configuration...${NC}"
+    
+    # Use jq if available, otherwise fallback to grep and sed
+    if command -v jq >/dev/null 2>&1; then
+        echo -e "${CYAN}→ Using jq for JSON parsing${NC}"
+        local binance_base_url=$(jq -r '.exchanges.Binance.base_url' "$config")
+        local bybit_base_url=$(jq -r '.exchanges.Bybit.base_url' "$config")
+        local bitget_base_url=$(jq -r '.exchanges.Bitget.base_url' "$config")
+        local kucoin_base_url=$(jq -r '.exchanges.KuCoin.base_url' "$config")
+        local okx_base_url=$(jq -r '.exchanges.OKX.base_url' "$config")
+    else
+        echo -e "${CYAN}→ Using grep and sed for extraction (less reliable)${NC}"
+        local binance_base_url=$(grep -A7 '"Binance"' "$config" | grep '"base_url"' | sed 's/.*"base_url": "\(.*\)",/\1/')
+        local bybit_base_url=$(grep -A7 '"Bybit"' "$config" | grep '"base_url"' | sed 's/.*"base_url": "\(.*\)",/\1/')
+        local bitget_base_url=$(grep -A7 '"Bitget"' "$config" | grep '"base_url"' | sed 's/.*"base_url": "\(.*\)",/\1/')
+        local kucoin_base_url=$(grep -A7 '"KuCoin"' "$config" | grep '"base_url"' | sed 's/.*"base_url": "\(.*\)",/\1/')
+        local okx_base_url=$(grep -A7 '"OKX"' "$config" | grep '"base_url"' | sed 's/.*"base_url": "\(.*\)",/\1/')
+    fi
+    
+    echo -e "${CYAN}→ Extracted URLs:${NC}"
+    echo -e "  Binance: ${binance_base_url}"
+    echo -e "  Bybit: ${bybit_base_url}"
+    echo -e "  Bitget: ${bitget_base_url}"
+    echo -e "  KuCoin: ${kucoin_base_url}"
+    echo -e "  OKX: ${okx_base_url}"
+    
+    # Test Binance connectivity
+    echo -e "${CYAN}→ Testing Binance API connectivity...${NC}"
+    local binance_status=$(curl -s -o /dev/null -w "%{http_code}" "${binance_base_url}/api/v3/ping")
+    if [ "$binance_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ Binance API is reachable (Status: $binance_status)${NC}"
+    else
+        echo -e "${RED}✖ Binance API is not reachable (Status: $binance_status)${NC}"
+        echo -e "${YELLOW}→ Testing Binance API with full response...${NC}"
+        curl -v "${binance_base_url}/api/v3/ping"
+    fi
+    
+    # Test Bybit connectivity
+    echo -e "${CYAN}→ Testing Bybit API connectivity...${NC}"
+    local bybit_status=$(curl -s -o /dev/null -w "%{http_code}" "${bybit_base_url}/v5/market/time")
+    if [ "$bybit_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ Bybit API is reachable (Status: $bybit_status)${NC}"
+    else
+        echo -e "${RED}✖ Bybit API is not reachable (Status: $bybit_status)${NC}"
+        echo -e "${YELLOW}→ Testing Bybit API with full response...${NC}"
+        curl -v "${bybit_base_url}/v5/market/time"
+    fi
+    
+    # Test Bitget connectivity
+    echo -e "${CYAN}→ Testing Bitget API connectivity...${NC}"
+    local bitget_status=$(curl -s -o /dev/null -w "%{http_code}" "${bitget_base_url}/api/v2/public/time")
+    if [ "$bitget_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ Bitget API is reachable (Status: $bitget_status)${NC}"
+    else
+        echo -e "${RED}✖ Bitget API is not reachable (Status: $bitget_status)${NC}"
+        echo -e "${YELLOW}→ Testing Bitget API with full response...${NC}"
+        curl -v "${bitget_base_url}/api/v2/public/time"
+    fi
+    
+    # Test KuCoin connectivity
+    echo -e "${CYAN}→ Testing KuCoin API connectivity...${NC}"
+    local kucoin_status=$(curl -s -o /dev/null -w "%{http_code}" "${kucoin_base_url}/api/v1/timestamp")
+    if [ "$kucoin_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ KuCoin API is reachable (Status: $kucoin_status)${NC}"
+    else
+        echo -e "${RED}✖ KuCoin API is not reachable (Status: $kucoin_status)${NC}"
+        echo -e "${YELLOW}→ Testing KuCoin API with full response...${NC}"
+        curl -v "${kucoin_base_url}/api/v1/timestamp"
+        echo -e "${YELLOW}→ Testing DNS resolution for ${kucoin_base_url}...${NC}"
+        host $(echo "${kucoin_base_url}" | sed 's|^https://||')
+    fi
+    
+    # Test OKX connectivity
+    echo -e "${CYAN}→ Testing OKX API connectivity...${NC}"
+    local okx_status=$(curl -s -o /dev/null -w "%{http_code}" "${okx_base_url}/api/v5/public/time")
+    if [ "$okx_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ OKX API is reachable (Status: $okx_status)${NC}"
+    else
+        echo -e "${RED}✖ OKX API is not reachable (Status: $okx_status)${NC}"
+        echo -e "${YELLOW}→ Testing OKX API with full response...${NC}"
+        curl -v "${okx_base_url}/api/v5/public/time"
+    fi
+    
+    echo -e "\n${YELLOW}→ Testing API authentication...${NC}"
+    
+    # Extract API keys using more reliable method
+    if command -v jq >/dev/null 2>&1; then
+        local binance_key=$(jq -r '.exchanges.Binance.api_key' "$config")
+        local binance_secret=$(jq -r '.exchanges.Binance.api_secret' "$config")
+        local bybit_key=$(jq -r '.exchanges.Bybit.api_key' "$config")
+        local bybit_secret=$(jq -r '.exchanges.Bybit.api_secret' "$config")
+        local okx_key=$(jq -r '.exchanges.OKX.api_key' "$config")
+        local okx_secret=$(jq -r '.exchanges.OKX.api_secret' "$config")
+        local okx_passphrase=$(jq -r '.exchanges.OKX.passphrase' "$config")
+        local kucoin_key=$(jq -r '.exchanges.KuCoin.api_key' "$config")
+        local kucoin_secret=$(jq -r '.exchanges.KuCoin.api_secret' "$config")
+        local kucoin_passphrase=$(jq -r '.exchanges.KuCoin.passphrase' "$config")
+        local bitget_key=$(jq -r '.exchanges.Bitget.api_key' "$config")
+        local bitget_secret=$(jq -r '.exchanges.Bitget.api_secret' "$config")
+        local bitget_passphrase=$(jq -r '.exchanges.Bitget.passphrase' "$config")
+    else
+        local binance_key=$(grep -A2 '"Binance"' "$config" | grep '"api_key"' | sed 's/.*"api_key": "\(.*\)",/\1/')
+        local binance_secret=$(grep -A3 '"Binance"' "$config" | grep '"api_secret"' | sed 's/.*"api_secret": "\(.*\)",/\1/')
+        local bybit_key=$(grep -A2 '"Bybit"' "$config" | grep '"api_key"' | sed 's/.*"api_key": "\(.*\)",/\1/')
+        local bybit_secret=$(grep -A3 '"Bybit"' "$config" | grep '"api_secret"' | sed 's/.*"api_secret": "\(.*\)",/\1/')
+        local okx_key=$(grep -A2 '"OKX"' "$config" | grep '"api_key"' | sed 's/.*"api_key": "\(.*\)",/\1/')
+        local okx_secret=$(grep -A3 '"OKX"' "$config" | grep '"api_secret"' | sed 's/.*"api_secret": "\(.*\)",/\1/')
+        local okx_passphrase=$(grep -A4 '"OKX"' "$config" | grep '"passphrase"' | sed 's/.*"passphrase": "\(.*\)",/\1/')
+        local kucoin_key=$(grep -A2 '"KuCoin"' "$config" | grep '"api_key"' | sed 's/.*"api_key": "\(.*\)",/\1/')
+        local kucoin_secret=$(grep -A3 '"KuCoin"' "$config" | grep '"api_secret"' | sed 's/.*"api_secret": "\(.*\)",/\1/')
+        local kucoin_passphrase=$(grep -A4 '"KuCoin"' "$config" | grep '"passphrase"' | sed 's/.*"passphrase": "\(.*\)",/\1/')
+        local bitget_key=$(grep -A2 '"Bitget"' "$config" | grep '"api_key"' | sed 's/.*"api_key": "\(.*\)",/\1/')
+        local bitget_secret=$(grep -A3 '"Bitget"' "$config" | grep '"api_secret"' | sed 's/.*"api_secret": "\(.*\)",/\1/')
+        local bitget_passphrase=$(grep -A4 '"Bitget"' "$config" | grep '"passphrase"' | sed 's/.*"passphrase": "\(.*\)",/\1/')
+    fi
+    
+    # Test Binance authentication
+    echo -e "${CYAN}→ Testing Binance API key validity...${NC}"
+    local timestamp=$(date +%s000)
+    local query="timestamp=$timestamp"
+    local signature=$(echo -n "$query" | openssl dgst -sha256 -hmac "$binance_secret" | cut -d' ' -f2)
+    local auth_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-MBX-APIKEY: $binance_key" "${binance_base_url}/api/v3/account?$query&signature=$signature")
+    
+    if [ "$auth_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ Binance API key is valid (Status: $auth_status)${NC}"
+    else
+        echo -e "${RED}✖ Binance API key is invalid (Status: $auth_status)${NC}"
+        echo -e "${YELLOW}→ Binance API auth response:${NC}"
+        curl -s -H "X-MBX-APIKEY: $binance_key" "${binance_base_url}/api/v3/account?$query&signature=$signature"
+        echo -e "\n${YELLOW}→ Possible issues: invalid API key, wrong permissions, IP restriction${NC}"
+    fi
+    
+    # Test Bybit authentication
+    echo -e "${CYAN}→ Testing Bybit API key validity...${NC}"
+    local timestamp=$(date +%s000)
+    local recv_window=5000
+    local query="category=spot&recv_window=${recv_window}&timestamp=${timestamp}"
+    local signature=$(echo -n "$query" | openssl dgst -sha256 -hmac "$bybit_secret" | cut -d' ' -f2)
+    local bybit_auth_status=$(curl -s -o /dev/null -w "%{http_code}" -H "X-BAPI-API-KEY: $bybit_key" -H "X-BAPI-SIGN: $signature" -H "X-BAPI-TIMESTAMP: $timestamp" -H "X-BAPI-RECV-WINDOW: $recv_window" "${bybit_base_url}/v5/account/wallet-balance?$query")
+    
+    if [ "$bybit_auth_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ Bybit API key is valid (Status: $bybit_auth_status)${NC}"
+    else
+        echo -e "${RED}✖ Bybit API key is invalid (Status: $bybit_auth_status)${NC}"
+        echo -e "${YELLOW}→ Bybit API auth response:${NC}"
+        curl -s -H "X-BAPI-API-KEY: $bybit_key" -H "X-BAPI-SIGN: $signature" -H "X-BAPI-TIMESTAMP: $timestamp" -H "X-BAPI-RECV-WINDOW: $recv_window" "${bybit_base_url}/v5/account/wallet-balance?$query"
+        echo -e "\n${YELLOW}→ Possible issues: invalid API key, wrong permissions, IP restriction${NC}"
+    fi
+    
+    # Test OKX authentication
+    echo -e "${CYAN}→ Testing OKX API key validity...${NC}"
+    # Get current timestamp in ISO format with milliseconds
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    local request_path="/api/v5/account/balance"
+    local query=""
+    # Create pre-hash string exactly as OKX expects
+    local pre_hash="${timestamp}GET${request_path}"
+    # Generate signature using base64 encoding of HMAC-SHA256
+    local okx_signature=$(echo -n "$pre_hash" | openssl dgst -sha256 -hmac "$okx_secret" -binary | base64)
+    
+    # Make the request with proper headers
+    local okx_auth_status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "OK-ACCESS-KEY: $okx_key" \
+        -H "OK-ACCESS-SIGN: $okx_signature" \
+        -H "OK-ACCESS-TIMESTAMP: $timestamp" \
+        -H "OK-ACCESS-PASSPHRASE: $okx_passphrase" \
+        -H "Content-Type: application/json" \
+        "${okx_base_url}${request_path}")
+    
+    if [ "$okx_auth_status" -eq 200 ]; then
+        echo -e "${GREEN}✓ OKX API key is valid (Status: $okx_auth_status)${NC}"
+    else
+        echo -e "${RED}✖ OKX API key is invalid (Status: $okx_auth_status)${NC}"
+        echo -e "${YELLOW}→ OKX API auth response:${NC}"
+        curl -s -H "OK-ACCESS-KEY: $okx_key" \
+            -H "OK-ACCESS-SIGN: $okx_signature" \
+            -H "OK-ACCESS-TIMESTAMP: $timestamp" \
+            -H "OK-ACCESS-PASSPHRASE: $okx_passphrase" \
+            -H "Content-Type: application/json" \
+            "${okx_base_url}${request_path}"
+        echo -e "\n${YELLOW}→ Possible issues: invalid API key, wrong permissions, IP restriction${NC}"
+        echo -e "${YELLOW}→ Debug info:${NC}"
+        echo -e "  Timestamp: ${timestamp}"
+        echo -e "  Request path: ${request_path}"
+        echo -e "  Pre-hash string: ${pre_hash}"
+    fi
+    
+    # Test KuCoin connectivity with DNS servers
+    if [ "$kucoin_status" -ne 200 ]; then
+        echo -e "${CYAN}→ Testing KuCoin with alternative DNS...${NC}"
+        # Try with Google DNS
+        local kucoin_domain=$(echo "${kucoin_base_url}" | sed 's|^https://||')
+        echo -e "${YELLOW}→ Resolving ${kucoin_domain} using Google DNS (8.8.8.8)...${NC}"
+        local kucoin_ip=$(dig @8.8.8.8 $kucoin_domain +short | head -1)
+        
+        if [ -n "$kucoin_ip" ]; then
+            echo -e "${GREEN}✓ Successfully resolved ${kucoin_domain} to ${kucoin_ip}${NC}"
+            echo -e "${YELLOW}→ Testing connection to KuCoin API via IP address...${NC}"
+            curl -v --connect-to "${kucoin_domain}:443:${kucoin_ip}:443" "${kucoin_base_url}/api/v1/timestamp"
+        else
+            echo -e "${RED}✖ Failed to resolve ${kucoin_domain} using Google DNS${NC}"
+        fi
+    fi
+    
+    echo -e "\n${GREEN}✓ API connectivity testing complete${NC}\n"
+    
+    # Count failures
+    local failures=0
+    [ "$binance_status" -ne 200 ] && ((failures++))
+    [ "$bybit_status" -ne 200 ] && ((failures++))
+    [ "$bitget_status" -ne 200 ] && ((failures++))
+    [ "$kucoin_status" -ne 200 ] && ((failures++))
+    [ "$okx_status" -ne 200 ] && ((failures++))
+    [ "$auth_status" -ne 200 ] && ((failures++))
+    [ "$bybit_auth_status" -ne 200 ] && ((failures++))
+    [ "$okx_auth_status" -ne 200 ] && ((failures++))
+    
+    if [ $failures -gt 0 ]; then
+        echo -e "${YELLOW}! Detected $failures API connection or authentication issues${NC}"
+        echo -e "${YELLOW}→ Continuing with real API connections despite issues${NC}"
+    fi
+}
+
+# Print header
+print_header
+
+# If test API only mode, skip build process
+if [ "$TEST_API_ONLY" = true ]; then
+    echo -e "${PURPLE}→ Running in API TEST ONLY mode${NC}"
+    echo -e "${PURPLE}→ Skipping build process${NC}"
+    
+    # Get absolute path to config file
+    if [[ "${CONFIG_FILE}" != /* ]]; then
+        # Config file is a relative path, convert to absolute
+        ABS_CONFIG_FILE="$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/$(basename "${CONFIG_FILE}")"
+    else
+        # Config file is already an absolute path
+        ABS_CONFIG_FILE="${CONFIG_FILE}"
+    fi
+    
+    echo -e "${YELLOW}→ Using config file: ${ABS_CONFIG_FILE}${NC}"
+    
+    # Test API connectivity without changing directory
+    test_exchange_connectivity "${ABS_CONFIG_FILE}"
+    exit $?
+fi
 
 # Check if build directory exists, if not create it
 if [ ! -d "build" ]; then
-    echo -e "${YELLOW}Creating build directory...${NC}"
+    echo -e "${YELLOW}→ Creating build directory...${NC}"
     mkdir -p build
 fi
 
 # Change to build directory
-cd build || { echo -e "${RED}Failed to enter build directory${NC}"; exit 1; }
+cd build || { echo -e "${RED}✖ Failed to enter build directory${NC}"; exit 1; }
 
 # Run CMake
-echo -e "${YELLOW}Configuring with CMake...${NC}"
-cmake .. || { echo -e "${RED}CMake configuration failed${NC}"; exit 1; }
+echo -e "${CYAN}→ Configuring with CMake...${NC}"
+CMAKE_OUTPUT=$(cmake .. 2>&1)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✖ CMake configuration failed${NC}"
+    echo -e "${GRAY}$CMAKE_OUTPUT${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ CMake configuration successful${NC}"
 
 # Build the project
-echo -e "${YELLOW}Building project...${NC}"
-make -j$(nproc) || { echo -e "${RED}Build failed${NC}"; exit 1; }
+echo -e "${CYAN}→ Building project...${NC}"
+MAKE_OUTPUT=$(make -j$(nproc) 2>&1)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✖ Build failed${NC}"
+    echo -e "${GRAY}$MAKE_OUTPUT${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Build successful${NC}"
 
 # Set the library path
 export LD_LIBRARY_PATH="$PWD:$LD_LIBRARY_PATH"
 
-# Run the application
-echo -e "${GREEN}Build successful! Starting application...${NC}"
-echo -e "${YELLOW}Using config file: ${CONFIG_FILE}${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop the application${NC}"
-echo -e "${GREEN}=========================================${NC}"
+# Print run header
+echo -e "\n${BOLD}${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
+echo -e "${BOLD}${BLUE}┃       ${GREEN}Funding Rate Arbitrage Bot Running       ${BLUE}┃${NC}"
+echo -e "${BOLD}${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
+echo -e "${YELLOW}→ Using config file: ${CONFIG_FILE}${NC}"
 
-# Run the application with the specified config file
-./funding_bot -c "../${CONFIG_FILE}"
+# Test API connectivity
+test_exchange_connectivity "$CONFIG_FILE"
+
+echo -e "${YELLOW}→ Press Ctrl+C to stop the application${NC}\n"
+
+# Function to format output line
+format_output() {
+    while IFS= read -r line; do
+        # Format log lines
+        if [[ $line =~ .*\[INFO\].* ]]; then
+            # Info messages in cyan
+            echo -e "${CYAN}$line${NC}"
+        elif [[ $line =~ .*\[ERROR\].* ]]; then
+            # Error messages in red
+            echo -e "${RED}$line${NC}"
+        elif [[ $line =~ .*\[WARN\].* ]]; then
+            # Warning messages in yellow
+            echo -e "${YELLOW}$line${NC}"
+        elif [[ $line =~ .*error.* ]] || [[ $line =~ .*Error.* ]] || [[ $line =~ .*failed.* ]]; then
+            # Error messages in red
+            echo -e "${RED}$line${NC}"
+        elif [[ $line =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}.* ]]; then
+            # Log timestamp in blue
+            TIMESTAMP=$(echo "$line" | grep -o "^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}.[0-9]\{3\}")
+            REST_OF_LINE=$(echo "$line" | sed "s/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}.[0-9]\{3\}//")
+            echo -e "${BLUE}${TIMESTAMP}${NC}${REST_OF_LINE}"
+        elif [[ $line =~ ^Bot\ is\ running.* ]] || [[ $line =~ ^Successfully.* ]]; then
+            # Success messages in green
+            echo -e "${GREEN}$line${NC}"
+        elif [[ $line == *"API"*"error"* ]]; then
+            # API errors in gray (less visible)
+            echo -e "${GRAY}$line${NC}"
+        elif [[ $line == DEBUG* ]]; then
+            # Debug output in purple
+            echo -e "${PURPLE}$line${NC}"
+        else
+            # Print other lines normally
+            echo "$line"
+        fi
+    done
+}
+
+# Run the application with the specified config file and format output
+./funding_bot -c "$CONFIG_FILE" 2>&1 | format_output
 
 # Return to original directory
 cd .. 

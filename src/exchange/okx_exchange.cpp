@@ -37,12 +37,11 @@ public:
         api_secret_(config.getApiSecret()),
         passphrase_(config.getParam("passphrase")),
         base_url_("https://www.okx.com"),
-        use_testnet_(config.getUseTestnet()),
+        use_testnet_(false), // Always use production API
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
-        if (use_testnet_) {
-            base_url_ = "https://www.okx.com"; // OKX uses the same base URL for testnet
-        }
+        // Always use production URL
+        base_url_ = "https://www.okx.com";
         
         // Initialize CURL
         curl_global_init(CURL_GLOBAL_ALL);
@@ -677,9 +676,7 @@ private:
             headers = curl_slist_append(headers, ("OK-ACCESS-TIMESTAMP: " + timestamp).c_str());
             headers = curl_slist_append(headers, ("OK-ACCESS-PASSPHRASE: " + passphrase_).c_str());
             
-            if (use_testnet_) {
-                headers = curl_slist_append(headers, "x-simulated-trading: 1");
-            }
+            // Never use testnet/simulation mode
         }
         
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);

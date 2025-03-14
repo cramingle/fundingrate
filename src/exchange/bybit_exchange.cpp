@@ -38,13 +38,11 @@ public:
         api_key_(config.getApiKey()),
         api_secret_(config.getApiSecret()),
         base_url_("https://api.bybit.com"),
-        use_testnet_(config.getUseTestnet()),
+        use_testnet_(false), // Always use production API
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
-        if (use_testnet_) {
-            // Use the actual Bybit API URL even for testnet
-            base_url_ = "https://api.bybit.com";
-        }
+        // Always use production URL
+        base_url_ = "https://api.bybit.com";
         
         // Initialize CURL
         curl_global_init(CURL_GLOBAL_ALL);
@@ -210,8 +208,17 @@ public:
                 if (result.contains("b")) {
                     for (const auto& bid : result["b"]) {
                         OrderBookLevel level;
-                        level.price = std::stod(bid[0].get<std::string>());
-                        level.amount = std::stod(bid[1].get<std::string>());
+                        // Handle both string and number types
+                        if (bid[0].is_string()) {
+                            level.price = std::stod(bid[0].get<std::string>());
+                        } else {
+                            level.price = bid[0].get<double>();
+                        }
+                        if (bid[1].is_string()) {
+                            level.amount = std::stod(bid[1].get<std::string>());
+                        } else {
+                            level.amount = bid[1].get<double>();
+                        }
                         book.bids.push_back(level);
                     }
                 }
@@ -220,8 +227,17 @@ public:
                 if (result.contains("a")) {
                     for (const auto& ask : result["a"]) {
                         OrderBookLevel level;
-                        level.price = std::stod(ask[0].get<std::string>());
-                        level.amount = std::stod(ask[1].get<std::string>());
+                        // Handle both string and number types
+                        if (ask[0].is_string()) {
+                            level.price = std::stod(ask[0].get<std::string>());
+                        } else {
+                            level.price = ask[0].get<double>();
+                        }
+                        if (ask[1].is_string()) {
+                            level.amount = std::stod(ask[1].get<std::string>());
+                        } else {
+                            level.amount = ask[1].get<double>();
+                        }
                         book.asks.push_back(level);
                     }
                 }

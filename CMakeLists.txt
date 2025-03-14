@@ -23,8 +23,12 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
+# Find libwebsockets using pkg-config as fallback
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBWEBSOCKETS REQUIRED libwebsockets)
+
 # Include directories
-include_directories(include)
+include_directories(include ${LIBWEBSOCKETS_INCLUDE_DIRS})
 
 # Add source files (excluding main.cpp for the library)
 file(GLOB_RECURSE LIB_SOURCES "src/*.cpp")
@@ -39,6 +43,7 @@ target_link_libraries(funding_core PUBLIC
     CURL::libcurl
     nlohmann_json::nlohmann_json
     OpenSSL::Crypto
+    ${LIBWEBSOCKETS_LIBRARIES}
 )
 
 # Main executable
@@ -46,6 +51,11 @@ add_executable(funding_bot src/main.cpp)
 
 # Link the executable to the library
 target_link_libraries(funding_bot PRIVATE funding_core)
+
+# Add WebSocket test
+add_executable(websocket_test src/test/websocket_test.cpp)
+target_link_libraries(websocket_test PRIVATE funding_core)
+target_include_directories(websocket_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # Install
 install(TARGETS funding_bot DESTINATION bin)

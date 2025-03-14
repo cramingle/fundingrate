@@ -31,20 +31,21 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::stri
 
 class BinanceExchange : public ExchangeInterface {
 public:
+    // Price cache entry structure
+    struct PriceCacheEntry {
+        double price;
+        std::chrono::system_clock::time_point timestamp;
+    };
+
     BinanceExchange(const ExchangeConfig& config) : 
         api_key_(config.getApiKey()),
         api_secret_(config.getApiSecret()),
         base_url_("https://api.binance.com"),
-        use_testnet_(config.getUseTestnet()),
+        use_testnet_(false), // Always use production API
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
-        if (use_testnet_) {
-            // Only set testnet URL if explicitly configured to use testnet
-            base_url_ = "https://testnet.binance.vision";
-        } else {
-            // Ensure we're using the production URL
-            base_url_ = "https://api.binance.com";
-        }
+        // Always use production URL
+        base_url_ = "https://api.binance.com";
         
         // Initialize CURL
         curl_global_init(CURL_GLOBAL_ALL);
@@ -196,17 +197,54 @@ public:
     
     double getPrice(const std::string& symbol) override {
         try {
-            std::string endpoint = "/api/v3/ticker/price?symbol=" + symbol;
-            json response = makeApiCall(endpoint);
-            
-            if (response.contains("price")) {
-                return std::stod(response["price"].get<std::string>());
-            } else {
-                throw std::runtime_error("Price data not found for symbol: " + symbol);
+            // Validate symbol format
+            if (symbol.empty()) {
+                throw std::runtime_error("Empty symbol provided");
             }
+            
+            // Convert symbol to uppercase for consistency
+            std::string upper_symbol = symbol;
+            std::transform(upper_symbol.begin(), upper_symbol.end(), upper_symbol.begin(), ::toupper);
+            
+            // Check if we have a cached price
+            auto it = price_cache_.find(upper_symbol);
+            if (it != price_cache_.end()) {
+                auto& cache_entry = it->second;
+                auto now = std::chrono::system_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - cache_entry.timestamp).count() < 5) {
+                    return cache_entry.price;
+                }
+            }
+            
+            // Determine if this is a futures symbol
+            bool is_futures = upper_symbol.find("PERP") != std::string::npos;
+            std::string endpoint = is_futures ? "/fapi/v1/ticker/price" : "/api/v3/ticker/price";
+            
+            // Add symbol parameter
+            std::string params = "symbol=" + upper_symbol;
+            
+            // Make API call
+            json response = makeApiCall(endpoint, params);
+            
+            if (!response.contains("price")) {
+                throw std::runtime_error("Price not found in response");
+            }
+            
+            // Handle both string and number types for price
+            double price;
+            if (response["price"].is_string()) {
+                price = std::stod(response["price"].get<std::string>());
+            } else {
+                price = response["price"].get<double>();
+            }
+            
+            // Update cache
+            price_cache_[upper_symbol] = PriceCacheEntry{price, std::chrono::system_clock::now()};
+            
+            return price;
         } catch (const std::exception& e) {
             std::cerr << "Error fetching price for " << symbol << ": " << e.what() << std::endl;
-            throw;
+            throw std::runtime_error("Failed to get price for " + symbol + ": " + std::string(e.what()));
         }
     }
     
@@ -678,6 +716,7 @@ private:
     FeeStructure fee_structure_;
     std::map<std::string, std::pair<double, double>> symbol_fees_; // symbol -> (maker, taker)
     std::chrono::system_clock::time_point last_fee_update_;
+    std::map<std::string, PriceCacheEntry> price_cache_; // symbol -> (price, timestamp)
     
     // Generate Binance API signature using HMAC-SHA256
     std::string generateSignature(const std::string& query_string) {
@@ -744,110 +783,79 @@ private:
             
             // Generate and add signature
             std::string signature = generateSignature(params);
-            params += "&signature=" + signature;
+            
+            // URL encode the signature
+            char* escaped_signature = curl_easy_escape(curl, signature.c_str(), signature.length());
+            if (escaped_signature) {
+                params += "&signature=";
+                params += escaped_signature;
+                curl_free(escaped_signature);
+            } else {
+                params += "&signature=" + signature;
+            }
         }
         
+        // Add query parameters to URL
         if (!params.empty()) {
-            url += "?" + params;
+            std::string full_url = url + "?" + params;
+            curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+            
+            // Debug output
+            std::cout << "DEBUG - Request URL: " << full_url << std::endl;
         }
         
         // Add API key header for authenticated requests
         struct curl_slist* headers = NULL;
         if (is_private) {
             headers = curl_slist_append(headers, ("X-MBX-APIKEY: " + api_key_).c_str());
+            
+            // Debug output
+            std::cout << "DEBUG - Using API Key: " << api_key_ << std::endl;
         }
         
         // Add content-type header
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         
-        // Set request method
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-        
-        // Implement retry logic
-        CURLcode res;
-        int retry_count = 0;
-        const int max_retries = 3;
-        long http_code = 0;
-        
-        do {
-            // Reset response string for each attempt
-            response_string.clear();
-            
-            // Perform the request
-            res = curl_easy_perform(curl);
-            
-            // Check for CURL errors
-            if (res != CURLE_OK) {
-                std::string error_msg = curl_easy_strerror(res);
-                std::cerr << "Binance API call failed (attempt " << retry_count + 1 << "/" << max_retries 
-                         << "): " << error_msg << " - URL: " << url << std::endl;
-                
-                if (retry_count < max_retries - 1) {
-                    retry_count++;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500 * retry_count));
-                    continue;
-                }
-                
-                curl_slist_free_all(headers);
-                curl_easy_cleanup(curl);
-                throw std::runtime_error("CURL request failed after " + std::to_string(max_retries) + 
-                                       " attempts: " + error_msg);
-            }
-            
-            // Get HTTP response code
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-            
-            // Check for HTTP errors
-            if (http_code >= 400) {
-                std::cerr << "Binance API HTTP error (attempt " << retry_count + 1 << "/" << max_retries 
-                         << "): " << http_code << " - URL: " << url << std::endl;
-                std::cerr << "Response: " << response_string << std::endl;
-                
-                if (retry_count < max_retries - 1) {
-                    retry_count++;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500 * retry_count));
-                    continue;
-                }
-                
-                curl_slist_free_all(headers);
-                curl_easy_cleanup(curl);
-                throw std::runtime_error("HTTP request failed with code " + std::to_string(http_code) + 
-                                       ": " + response_string);
-            }
-            
-            // Success
-            break;
-            
-        } while (retry_count < max_retries);
+        // Perform the request
+        CURLcode res = curl_easy_perform(curl);
         
         // Clean up
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         
-        // Check for empty response
-        if (response_string.empty()) {
-            std::cerr << "Binance API returned empty response for URL: " << url << std::endl;
-            return json::object(); // Return empty JSON object instead of throwing
+        if (res != CURLE_OK) {
+            throw std::runtime_error("CURL request failed: " + std::string(curl_easy_strerror(res)));
         }
         
-        // Parse JSON response
+        // Parse and return JSON response
         try {
-            return json::parse(response_string);
+            json response = json::parse(response_string);
+            
+            // Check for error response
+            if (response.contains("code") && response.contains("msg")) {
+                // Only treat it as an error if both code and msg are present (Binance error format)
+                if (response["code"] != 0 && response["code"] != 200) {
+                    std::string error_msg = response["msg"].get<std::string>();
+                    throw std::runtime_error("API error: " + error_msg);
+                }
+            }
+            
+            return response;
         } catch (const std::exception& e) {
-            std::cerr << "Failed to parse JSON response: " << e.what() << std::endl;
-            std::cerr << "Response string: " << response_string << std::endl;
-            std::cerr << "URL: " << url << std::endl;
             throw std::runtime_error("Failed to parse JSON response: " + std::string(e.what()) + 
-                                   " - Response: " + response_string.substr(0, 100) + "...");
+                                   ", Response: " + response_string);
         }
     }
     
     // Update the fee structure from the exchange
     void updateFeeStructure() {
         try {
-            // Get trading fee information - timestamp and signature will be added by makeApiCall
-            json fee_info = makeApiCall("/api/v3/account", "", true);
+            // Get trading fee information with proper timestamp and signature
+            std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            std::string params = "timestamp=" + timestamp;
+            json fee_info = makeApiCall("/api/v3/account", params, true);
             
             // Parse maker/taker fees - handle different data types
             if (fee_info.contains("makerCommission")) {

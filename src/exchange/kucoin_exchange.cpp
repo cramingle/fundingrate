@@ -111,13 +111,15 @@ KuCoinExchange::KuCoinExchange(const ExchangeConfig& config) :
     passphrase_(config.getParam("passphrase")),
     base_url_("https://api.kucoin.com"),
     futures_url_("https://api-futures.kucoin.com"),
-    use_testnet_(config.getUseTestnet()),
+    use_testnet_(false), // Always use production API
     last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
     
-    if (use_testnet_) {
-        base_url_ = "https://openapi-sandbox.kucoin.com";
-        futures_url_ = "https://api-sandbox-futures.kucoin.com";
-    }
+    // Always use production URLs
+    base_url_ = "https://api.kucoin.com";
+    futures_url_ = "https://api-futures.kucoin.com";
+    
+    // Add fallback URLs if the primary ones fail
+    std::cout << "Using KuCoin API URL: " << base_url_ << std::endl;
     
     // Initialize CURL
     curl_global_init(CURL_GLOBAL_ALL);
@@ -510,155 +512,53 @@ std::vector<Candle> KuCoinExchange::getCandles(
 
 // Market data
 std::vector<Instrument> KuCoinExchange::getAvailableInstruments(MarketType type) {
-    std::vector<Instrument> instruments;
-    
     try {
-        std::string endpoint;
+        json response = makeApiCall("/api/v1/symbols");
         
-        // Select the appropriate endpoint based on market type
-        if (type == MarketType::SPOT) {
-            endpoint = "/api/v1/symbols";
-        } else if (type == MarketType::PERPETUAL) {
-            endpoint = "/api/v1/contracts/active";
-        } else if (type == MarketType::MARGIN) {
-            endpoint = "/api/v1/margin/markets"; // For margin trading
-        } else {
-            throw std::runtime_error("Unsupported market type");
+        if (!response.contains("data")) {
+            throw std::runtime_error("Invalid response format: missing 'data' field");
         }
         
-        // Make API call
-        json response = makeApiCall(endpoint);
-        
-        if (response["code"] == "200000" && response.contains("data")) {
-            auto& data = response["data"];
-            
-            // Parse the response based on market type
-            if (type == MarketType::SPOT) {
-                for (const auto& symbol_data : data) {
-                    if (symbol_data.contains("symbol") && 
-                        symbol_data.contains("baseCurrency") && 
-                        symbol_data.contains("quoteCurrency")) {
-                        
-                        Instrument instrument;
-                        instrument.symbol = symbol_data["symbol"];
-                        instrument.market_type = MarketType::SPOT;
-                        instrument.base_currency = symbol_data["baseCurrency"];
-                        instrument.quote_currency = symbol_data["quoteCurrency"];
-                        
-                        // Extract trading constraints if available
-                        if (symbol_data.contains("baseMinSize")) {
-                            instrument.min_order_size = std::stod(symbol_data["baseMinSize"].get<std::string>());
-                            instrument.min_qty = instrument.min_order_size;
-                        }
-                        
-                        if (symbol_data.contains("baseMaxSize")) {
-                            instrument.max_qty = std::stod(symbol_data["baseMaxSize"].get<std::string>());
-                        }
-                        
-                        if (symbol_data.contains("priceIncrement")) {
-                            instrument.tick_size = std::stod(symbol_data["priceIncrement"].get<std::string>());
-                            
-                            // Calculate precision from tick size
-                            std::string tick_str = symbol_data["priceIncrement"].get<std::string>();
-                            size_t decimal_pos = tick_str.find('.');
-                            if (decimal_pos != std::string::npos) {
-                                instrument.price_precision = tick_str.length() - decimal_pos - 1;
-                            }
-                        }
-                        
-                        if (symbol_data.contains("baseIncrement")) {
-                            std::string qty_str = symbol_data["baseIncrement"].get<std::string>();
-                            size_t decimal_pos = qty_str.find('.');
-                            if (decimal_pos != std::string::npos) {
-                                instrument.qty_precision = qty_str.length() - decimal_pos - 1;
-                            }
-                        }
-                        
-                        instruments.push_back(instrument);
+        std::vector<Instrument> instruments;
+        for (const auto& symbol : response["data"]) {
+            try {
+                Instrument instrument;
+                instrument.symbol = symbol["symbol"].get<std::string>();
+                instrument.base_currency = symbol["baseCurrency"].get<std::string>();
+                instrument.quote_currency = symbol["quoteCurrency"].get<std::string>();
+                
+                // Handle both string and number types for price precision
+                if (symbol.contains("priceIncrement")) {
+                    if (symbol["priceIncrement"].is_string()) {
+                        instrument.price_precision = std::stod(symbol["priceIncrement"].get<std::string>());
+                    } else {
+                        instrument.price_precision = symbol["priceIncrement"].get<double>();
                     }
                 }
-            } else if (type == MarketType::PERPETUAL) {
-                for (const auto& contract_data : data) {
-                    if (contract_data.contains("symbol") && 
-                        contract_data.contains("baseCurrency") && 
-                        contract_data.contains("quoteCurrency") &&
-                        contract_data.contains("type") && 
-                        contract_data["type"] == "FFWCSX") { // FFWCSX is the code for perpetual futures
-                        
-                        Instrument instrument;
-                        instrument.symbol = contract_data["symbol"];
-                        instrument.market_type = MarketType::PERPETUAL;
-                        instrument.base_currency = contract_data["baseCurrency"];
-                        instrument.quote_currency = contract_data["quoteCurrency"];
-                        
-                        // Extract trading constraints if available
-                        if (contract_data.contains("lotSize")) {
-                            instrument.min_order_size = std::stod(contract_data["lotSize"].get<std::string>());
-                            instrument.min_qty = instrument.min_order_size;
-                        }
-                        
-                        if (contract_data.contains("maxOrderQty")) {
-                            instrument.max_qty = std::stod(contract_data["maxOrderQty"].get<std::string>());
-                        }
-                        
-                        if (contract_data.contains("tickSize")) {
-                            instrument.tick_size = std::stod(contract_data["tickSize"].get<std::string>());
-                            
-                            // Calculate precision from tick size
-                            std::string tick_str = contract_data["tickSize"].get<std::string>();
-                            size_t decimal_pos = tick_str.find('.');
-                            if (decimal_pos != std::string::npos) {
-                                instrument.price_precision = tick_str.length() - decimal_pos - 1;
-                            }
-                        }
-                        
-                        if (contract_data.contains("lotSize")) {
-                            std::string qty_str = contract_data["lotSize"].get<std::string>();
-                            size_t decimal_pos = qty_str.find('.');
-                            if (decimal_pos != std::string::npos) {
-                                instrument.qty_precision = qty_str.length() - decimal_pos - 1;
-                            } else {
-                                instrument.qty_precision = 0;
-                            }
-                        }
-                        
-                        instruments.push_back(instrument);
+                
+                // Handle both string and number types for amount precision
+                if (symbol.contains("baseIncrement")) {
+                    if (symbol["baseIncrement"].is_string()) {
+                        instrument.qty_precision = std::stod(symbol["baseIncrement"].get<std::string>());
+                    } else {
+                        instrument.qty_precision = symbol["baseIncrement"].get<double>();
                     }
                 }
-            } else if (type == MarketType::MARGIN) {
-                for (const auto& margin_data : data) {
-                    if (margin_data.contains("symbol") && 
-                        margin_data.contains("baseCurrency") && 
-                        margin_data.contains("quoteCurrency")) {
-                        
-                        Instrument instrument;
-                        instrument.symbol = margin_data["symbol"];
-                        instrument.market_type = MarketType::MARGIN;
-                        instrument.base_currency = margin_data["baseCurrency"];
-                        instrument.quote_currency = margin_data["quoteCurrency"];
-                        
-                        // For margin, we might need to get additional details from the spot market
-                        // as KuCoin's margin API doesn't provide all the details
-                        instruments.push_back(instrument);
-                    }
+                
+                // Only add active symbols
+                if (symbol.contains("enableTrading") && symbol["enableTrading"].get<bool>()) {
+                    instruments.push_back(instrument);
                 }
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing KuCoin symbol: " << e.what() << std::endl;
+                continue; // Skip this symbol and continue with others
             }
-        } else {
-            std::string error_msg = "Failed to get instruments: ";
-            if (response.contains("msg")) {
-                error_msg += response["msg"].get<std::string>();
-            } else {
-                error_msg += "Unknown error";
-            }
-            throw std::runtime_error(error_msg);
         }
         
+        return instruments;
     } catch (const std::exception& e) {
-        std::cerr << "Error in KuCoinExchange::getAvailableInstruments: " << e.what() << std::endl;
-        // Return empty vector on error
+        throw std::runtime_error("Failed to get instruments: " + std::string(e.what()));
     }
-    
-    return instruments;
 }
 
 double KuCoinExchange::getPrice(const std::string& symbol) {

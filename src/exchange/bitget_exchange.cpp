@@ -37,13 +37,11 @@ public:
         api_secret_(config.getApiSecret()),
         passphrase_(config.getParam("passphrase")),  // Bitget requires a passphrase
         base_url_("https://api.bitget.com"),
-        use_testnet_(config.getUseTestnet()),
+        use_testnet_(false), // Always use production API
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
-        if (use_testnet_) {
-            // Use the actual Bitget API URL even for testnet
-            base_url_ = "https://api.bitget.com";
-        }
+        // Always use production URL
+        base_url_ = "https://api.bitget.com";
         
         // Initialize CURL
         curl_global_init(CURL_GLOBAL_ALL);
