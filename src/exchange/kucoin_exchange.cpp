@@ -76,7 +76,7 @@ public:
 private:
     std::string api_key_;
     std::string api_secret_;
-    std::string api_passphrase_;
+    std::string passphrase_;
     std::string base_url_;
     bool use_testnet_;
     FeeStructure fee_structure_;
@@ -106,17 +106,13 @@ private:
 KuCoinExchange::KuCoinExchange(const ExchangeConfig& config) : 
     api_key_(config.getApiKey()),
     api_secret_(config.getApiSecret()),
-    api_passphrase_(config.getParam("passphrase")),  // KuCoin requires a passphrase
-    base_url_("https://api.kucoin.com"),
+    passphrase_(config.getParam("passphrase")),
+    base_url_("https://api.kucoin.com"),  // Updated base URL
     use_testnet_(config.getUseTestnet()),
-    last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
+    last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) {
     
     if (use_testnet_) {
-        // Use the sandbox URL for testnet
-        base_url_ = "https://openapi-sandbox.kucoin.com";
-    } else {
-        // Use the production URL
-        base_url_ = "https://api.kucoin.com";
+        base_url_ = "https://api-sandbox.kucoin.com";
     }
     
     // Initialize CURL
@@ -145,7 +141,7 @@ std::string KuCoinExchange::getBaseUrl() const {
 bool KuCoinExchange::isConnected() {
     try {
         // Make a simple API call to test connectivity
-        std::string endpoint = "/api/v1/market/allTickers";
+        std::string endpoint = "/api/v1/timestamp";
         makeApiCall(endpoint, "", false);
         return true;
     } catch (const std::exception& e) {
@@ -166,7 +162,7 @@ bool KuCoinExchange::reconnect() {
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 // Test connection by making a simple API call
-                std::string endpoint = "/api/v1/market/allTickers";
+                std::string endpoint = "/api/v1/timestamp";
                 json response = makeApiCall(endpoint, "", false);
                 
                 if (response.contains("code") && response["code"].get<int>() == 200000) {
@@ -175,13 +171,9 @@ bool KuCoinExchange::reconnect() {
                 }
             } catch (const std::exception& e) {
                 std::cerr << "KuCoin reconnect attempt " << attempt << " failed: " << e.what() << std::endl;
-                if (attempt < 3) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
-        
-        std::cerr << "Failed to reconnect to KuCoin after 3 attempts" << std::endl;
         return false;
     } catch (const std::exception& e) {
         std::cerr << "KuCoin reconnect failed: " << e.what() << std::endl;
@@ -222,7 +214,7 @@ std::string KuCoinExchange::getEncryptedPassphrase(const std::string& timestamp)
     
     HMAC(EVP_sha256(),
          api_secret_.c_str(), api_secret_.length(),
-         reinterpret_cast<const unsigned char*>(api_passphrase_.c_str()), api_passphrase_.length(),
+         reinterpret_cast<const unsigned char*>(passphrase_.c_str()), passphrase_.length(),
          digest, &digest_len);
     
     char base64_digest[1024] = {0};
@@ -238,35 +230,21 @@ json KuCoinExchange::makeApiCall(const std::string& endpoint,
                                bool is_private, 
                                const std::string& method) {
     CURL* curl = curl_easy_init();
-    std::string response_string;
-    std::string url = base_url_ + endpoint;
-    
     if (!curl) {
         throw std::runtime_error("Failed to initialize CURL");
     }
+
+    std::string response_string;
+    std::string url = base_url_ + endpoint;
     
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-    
-    // Disable SSL verification for production use
-    // This is necessary because KuCoin's SSL certificates might not be properly validated
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    
-    // Set connection timeout to prevent hanging
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable SSL verification
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     
-    // Enable verbose output for debugging
-    // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-    
-    // Set request method
-    if (method != "GET") {
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-    }
-    
-    // Prepare headers
     struct curl_slist* headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     
