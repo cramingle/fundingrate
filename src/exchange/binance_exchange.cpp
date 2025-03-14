@@ -39,7 +39,11 @@ public:
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
+            // Only set testnet URL if explicitly configured to use testnet
             base_url_ = "https://testnet.binance.vision";
+        } else {
+            // Ensure we're using the production URL
+            base_url_ = "https://api.binance.com";
         }
         
         // Initialize CURL

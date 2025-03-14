@@ -922,13 +922,20 @@ public:
     // Utility functions
     bool isConnected() override {
         try {
-            // Make a simple API call to test connectivity
+            // First try the time endpoint which is lightweight
             std::string endpoint = "/api/spot/v1/public/time";
             makeApiCall(endpoint, "", false);
             return true;
         } catch (const std::exception& e) {
-            std::cerr << "Bitget connection check failed: " << e.what() << std::endl;
-            return false;
+            try {
+                // If time endpoint fails, try the contracts endpoint as a fallback
+                std::string endpoint = "/api/mix/v1/market/contracts?productType=umcbl";
+                makeApiCall(endpoint, "", false);
+                return true;
+            } catch (const std::exception& e) {
+                std::cerr << "Bitget connection check failed: " << e.what() << std::endl;
+                return false;
+            }
         }
     }
     
@@ -939,12 +946,24 @@ public:
             
             // Try up to 3 times with a short delay between attempts
             for (int attempt = 1; attempt <= 3; attempt++) {
-                if (isConnected()) {
+                try {
+                    // First try the time endpoint which is lightweight
+                    std::string endpoint = "/api/spot/v1/public/time";
+                    makeApiCall(endpoint, "", false);
                     return true;
+                } catch (const std::exception& e) {
+                    try {
+                        // If time endpoint fails, try the contracts endpoint as a fallback
+                        std::string endpoint = "/api/mix/v1/market/contracts?productType=umcbl";
+                        makeApiCall(endpoint, "", false);
+                        return true;
+                    } catch (const std::exception& e) {
+                        std::cerr << "Bitget reconnect attempt " << attempt << " failed: " << e.what() << std::endl;
+                        if (attempt < 3) {
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                        }
+                    }
                 }
-                
-                std::cerr << "Bitget reconnect attempt " << attempt << " failed, retrying..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
             
             std::cerr << "Failed to reconnect to Bitget after 3 attempts" << std::endl;

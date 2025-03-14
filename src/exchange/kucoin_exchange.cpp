@@ -145,7 +145,7 @@ std::string KuCoinExchange::getBaseUrl() const {
 bool KuCoinExchange::isConnected() {
     try {
         // Make a simple API call to test connectivity
-        std::string endpoint = "/api/v1/timestamp";
+        std::string endpoint = "/api/v1/market/allTickers";
         makeApiCall(endpoint, "", false);
         return true;
     } catch (const std::exception& e) {
@@ -166,7 +166,7 @@ bool KuCoinExchange::reconnect() {
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 // Test connection by making a simple API call
-                std::string endpoint = "/api/v1/timestamp";
+                std::string endpoint = "/api/v1/market/allTickers";
                 json response = makeApiCall(endpoint, "", false);
                 
                 if (response.contains("code") && response["code"].get<int>() == 200000) {
