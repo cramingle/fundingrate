@@ -723,21 +723,31 @@ private:
     // Make API call to Binance
     json makeApiCall(const std::string& endpoint, std::string params = "", bool is_private = false, const std::string& method = "GET") {
         CURL* curl = curl_easy_init();
-        std::string response_string;
-        std::string url;
-        
-        // Handle futures endpoints correctly
-        if (endpoint.find("/fapi/") == 0) {
-            // For futures API, always use the main API URL, not testnet
-            url = "https://fapi.binance.com" + endpoint;
-        } else {
-            // For other endpoints, use the configured base URL
-            url = base_url_ + endpoint;
-        }
-        
         if (!curl) {
             throw std::runtime_error("Failed to initialize CURL");
         }
+
+        std::string response_string;
+        std::string url;
+        
+        // Check if this is a futures API call
+        if (endpoint.find("/fapi/") == 0) {
+            // Use the futures API URL
+            url = "https://fapi.binance.com" + endpoint;
+        } else {
+            // Use the regular API URL
+            url = base_url_ + endpoint;
+        }
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable SSL verification
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);        // 30 second timeout
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L); // 10 second connect timeout
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Follow redirects
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);       // Maximum number of redirects
         
         // For private API calls, add timestamp and signature
         if (is_private) {
@@ -761,14 +771,6 @@ private:
         if (!params.empty()) {
             url += "?" + params;
         }
-        
-        // Set up CURL options
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         
         // Add API key header for authenticated requests
         struct curl_slist* headers = NULL;

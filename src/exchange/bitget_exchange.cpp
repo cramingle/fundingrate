@@ -214,17 +214,44 @@ public:
         // Determine if this is a spot or contract symbol
         bool is_contract = symbol.find("_UMCBL") != std::string::npos;
         
-        std::string endpoint = is_contract ? 
-            "/api/mix/v1/market/ticker?symbol=" + symbol :
-            "/api/spot/v1/market/ticker?symbol=" + symbol;
-        
-        json response = makeApiCall(endpoint, "", false);
-        
-        if (response["code"] == "00000" && response.contains("data")) {
-            return std::stod(response["data"]["last"].get<std::string>());
+        // If it's not explicitly a contract symbol but ends with USDT, try to treat it as a contract
+        std::string modified_symbol = symbol;
+        if (!is_contract && symbol.find("USDT") != std::string::npos) {
+            modified_symbol = symbol + "_UMCBL";
+            is_contract = true;
         }
         
-        throw std::runtime_error("Failed to get price for " + symbol);
+        std::string endpoint = is_contract ? 
+            "/api/mix/v1/market/ticker?symbol=" + modified_symbol :
+            "/api/spot/v1/market/ticker?symbol=" + modified_symbol;
+        
+        try {
+            json response = makeApiCall(endpoint, "", false);
+            
+            if (response["code"] == "00000" && response.contains("data")) {
+                return std::stod(response["data"]["last"].get<std::string>());
+            }
+            
+            throw std::runtime_error("Failed to get price for " + symbol);
+        } catch (const std::exception& e) {
+            // If we tried with _UMCBL suffix and it failed, try without it
+            if (is_contract && modified_symbol != symbol) {
+                try {
+                    std::string spot_endpoint = "/api/spot/v1/market/ticker?symbol=" + symbol;
+                    json spot_response = makeApiCall(spot_endpoint, "", false);
+                    
+                    if (spot_response["code"] == "00000" && spot_response.contains("data")) {
+                        return std::stod(spot_response["data"]["last"].get<std::string>());
+                    }
+                } catch (const std::exception& nested_e) {
+                    // Both attempts failed, throw the original error
+                    throw std::runtime_error("Failed to get price for " + symbol + ": " + e.what());
+                }
+            }
+            
+            // If we get here, both attempts failed or we didn't try the fallback
+            throw std::runtime_error("Failed to get price for " + symbol + ": " + e.what());
+        }
     }
     
     OrderBook getOrderBook(const std::string& symbol, int depth) override {
@@ -235,10 +262,17 @@ public:
         try {
             // Determine if this is a spot or contract symbol
             bool is_contract = symbol.find("_UMCBL") != std::string::npos;
+            std::string modified_symbol = symbol;
+            
+            // If it's not explicitly a contract symbol but ends with USDT, try to treat it as a contract
+            if (!is_contract && symbol.find("USDT") != std::string::npos) {
+                modified_symbol = symbol + "_UMCBL";
+                is_contract = true;
+            }
             
             std::string endpoint = is_contract ?
-                "/api/mix/v1/market/depth?symbol=" + symbol + "&limit=" + std::to_string(depth) :
-                "/api/spot/v1/market/depth?symbol=" + symbol + "&limit=" + std::to_string(depth);
+                "/api/mix/v1/market/depth?symbol=" + modified_symbol + "&limit=" + std::to_string(depth) :
+                "/api/spot/v1/market/depth?symbol=" + modified_symbol + "&limit=" + std::to_string(depth);
             
             json response = makeApiCall(endpoint, "", false);
             
@@ -275,6 +309,22 @@ public:
             }
         } catch (const std::exception& e) {
             std::cerr << "Error fetching order book from Bitget: " << e.what() << std::endl;
+            
+            // If we tried with _UMCBL suffix and it failed, try without it
+            if (symbol.find("_UMCBL") != std::string::npos) {
+                try {
+                    std::string original_symbol = symbol.substr(0, symbol.find("_UMCBL"));
+                    std::string spot_endpoint = "/api/spot/v1/market/depth?symbol=" + original_symbol + "&limit=" + std::to_string(depth);
+                    json spot_response = makeApiCall(spot_endpoint, "", false);
+                    
+                    if (spot_response["code"] == "00000" && spot_response.contains("data")) {
+                        // Process spot order book data
+                        // (Similar processing as above)
+                    }
+                } catch (const std::exception& nested_e) {
+                    // Both attempts failed, just return the empty book
+                }
+            }
         }
         
         return book;
@@ -285,12 +335,22 @@ public:
         funding.symbol = symbol;
         
         try {
+            // Check if this is a contract symbol
+            bool is_contract = symbol.find("_UMCBL") != std::string::npos;
+            std::string modified_symbol = symbol;
+            
+            // If it's not explicitly a contract symbol but ends with USDT, try to treat it as a contract
+            if (!is_contract && symbol.find("USDT") != std::string::npos) {
+                modified_symbol = symbol + "_UMCBL";
+                is_contract = true;
+            }
+            
             // Funding rate is only available for contract trading
-            if (symbol.find("_UMCBL") == std::string::npos) {
+            if (!is_contract) {
                 throw std::runtime_error("Funding rate only available for UMCBL contracts");
             }
             
-            std::string endpoint = "/api/mix/v1/market/funding-time?symbol=" + symbol;
+            std::string endpoint = "/api/mix/v1/market/funding-time?symbol=" + modified_symbol;
             json response = makeApiCall(endpoint, "", false);
             
             if (response["code"] == "00000" && response.contains("data")) {

@@ -142,8 +142,10 @@ bool KuCoinExchange::isConnected() {
     try {
         // Make a simple API call to test connectivity
         std::string endpoint = "/api/v1/timestamp";
-        makeApiCall(endpoint, "", false);
-        return true;
+        json response = makeApiCall(endpoint, "", false);
+        
+        // Check if the response contains the expected code
+        return (response.contains("code") && response["code"] == "200000");
     } catch (const std::exception& e) {
         std::cerr << "KuCoin connection check failed: " << e.what() << std::endl;
         return false;
@@ -165,7 +167,7 @@ bool KuCoinExchange::reconnect() {
                 std::string endpoint = "/api/v1/timestamp";
                 json response = makeApiCall(endpoint, "", false);
                 
-                if (response.contains("code") && response["code"].get<int>() == 200000) {
+                if (response.contains("code") && response["code"] == "200000") {
                     std::cout << "Successfully reconnected to KuCoin" << std::endl;
                     return true;
                 }
@@ -244,6 +246,8 @@ json KuCoinExchange::makeApiCall(const std::string& endpoint,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Follow redirects
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);       // Maximum number of redirects
     
     struct curl_slist* headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");

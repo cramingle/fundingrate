@@ -36,14 +36,14 @@ public:
         api_key_(config.getApiKey()),
         api_secret_(config.getApiSecret()),
         passphrase_(config.getParam("passphrase")),
-        base_url_("https://www.okx.com"),
+        base_url_("https://api.okx.com"),
         use_testnet_(config.getUseTestnet()),
         last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
         if (use_testnet_) {
-            base_url_ = "https://www.okx.com/api/v5/demo";
+            base_url_ = "https://api.okx.com/api/v5/demo";
         } else {
-            base_url_ = "https://www.okx.com/api/v5";
+            base_url_ = "https://api.okx.com/api/v5";
         }
         
         // Initialize CURL
@@ -577,6 +577,8 @@ private:
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);        // 30 second timeout
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L); // 10 second connect timeout
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Follow redirects
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);       // Maximum number of redirects
         
         struct curl_slist* headers = NULL;
         
