@@ -145,6 +145,10 @@ std::vector<ArbitrageOpportunity> SameExchangeSpotPerpStrategy::findOpportunitie
             opportunity.position_risk_score = calculateRiskScore(opportunity);
             opportunity.discovery_time = std::chrono::system_clock::now();
             
+            // Set the strategy type
+            opportunity.strategy_type = "SameExchangeSpotPerpStrategy";
+            opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
+            
             opportunities.push_back(opportunity);
         }
     } catch (const std::exception& e) {

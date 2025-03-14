@@ -422,6 +422,7 @@ bool FundingBot::processOpportunity(const ArbitrageOpportunity& opportunity) {
        << opportunity.pair.exchange1 << ":" << opportunity.pair.symbol1 
        << " <-> "
        << opportunity.pair.exchange2 << ":" << opportunity.pair.symbol2
+       << ", Strategy: " << (!opportunity.strategy_type.empty() ? opportunity.strategy_type : "Unknown")
        << ", Funding rate: " << (opportunity.net_funding_rate) << "%/year"
        << ", Est. profit: " << formatCurrency(opportunity.estimated_profit, 4) << "%";
     log(ss.str());
@@ -834,6 +835,8 @@ void FundingBot::saveState() {
             opp_json["net_funding_rate"] = position.opportunity.net_funding_rate;
             opp_json["estimated_profit"] = position.opportunity.estimated_profit;
             opp_json["entry_price_spread"] = position.opportunity.entry_price_spread;
+            opp_json["strategy_type"] = position.opportunity.strategy_type;
+            opp_json["strategy_index"] = position.opportunity.strategy_index;
             pos_json["opportunity"] = opp_json;
             
             // Price information
@@ -928,6 +931,19 @@ void FundingBot::loadSavedState() {
             position.opportunity.net_funding_rate = opp_json["net_funding_rate"];
             position.opportunity.estimated_profit = opp_json["estimated_profit"];
             position.opportunity.entry_price_spread = opp_json["entry_price_spread"];
+            
+            // Load strategy information if available
+            if (opp_json.contains("strategy_type")) {
+                position.opportunity.strategy_type = opp_json["strategy_type"];
+            } else {
+                position.opportunity.strategy_type = "Unknown"; // Default for backward compatibility
+            }
+            
+            if (opp_json.contains("strategy_index")) {
+                position.opportunity.strategy_index = opp_json["strategy_index"];
+            } else {
+                position.opportunity.strategy_index = -1; // Default for backward compatibility
+            }
             
             // Price information
             position.entry_price1 = pos_json["entry_price1"];

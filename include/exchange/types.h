@@ -227,6 +227,8 @@ struct ArbitrageOpportunity {
     double max_position_size;        // Maximum position size based on liquidity
     double position_risk_score;      // Risk score (0-100)
     std::chrono::system_clock::time_point discovery_time;
+    std::string strategy_type;       // Identifier for the strategy that created this opportunity
+    int strategy_index;              // Index of the strategy in the composite strategy (if applicable)
 };
 
 } // namespace funding 

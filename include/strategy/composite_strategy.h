@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <string>
+#include <typeinfo>
 
 namespace funding {
 
@@ -23,8 +25,21 @@ public:
         std::vector<ArbitrageOpportunity> all_opportunities;
         
         // Collect opportunities from all sub-strategies
-        for (const auto& strategy : strategies_) {
-            auto opportunities = strategy->findOpportunities();
+        for (size_t i = 0; i < strategies_.size(); ++i) {
+            auto opportunities = strategies_[i]->findOpportunities();
+            
+            // Set the strategy index for each opportunity
+            for (auto& opp : opportunities) {
+                // Set the strategy type if not already set
+                if (opp.strategy_type.empty()) {
+                    // Try to get the actual type name
+                    opp.strategy_type = typeid(*strategies_[i]).name();
+                }
+                
+                // Set the strategy index in the composite
+                opp.strategy_index = static_cast<int>(i);
+            }
+            
             all_opportunities.insert(all_opportunities.end(), 
                                     opportunities.begin(), 
                                     opportunities.end());
@@ -40,10 +55,14 @@ public:
     }
     
     bool validateOpportunity(const ArbitrageOpportunity& opportunity) override {
-        // Find the strategy that handles this opportunity's exchange pair
+        // Use the strategy_index if available
+        if (opportunity.strategy_index >= 0 && 
+            opportunity.strategy_index < static_cast<int>(strategies_.size())) {
+            return strategies_[opportunity.strategy_index]->validateOpportunity(opportunity);
+        }
+        
+        // Fallback to the old method if strategy_index is not set
         for (const auto& strategy : strategies_) {
-            // This is a simplified approach - in a real implementation, 
-            // we'd need a way to identify which strategy created an opportunity
             auto opportunities = strategy->findOpportunities();
             
             // Check if this strategy handles the exchange pair
@@ -64,7 +83,13 @@ public:
     }
     
     double calculateOptimalPositionSize(const ArbitrageOpportunity& opportunity) override {
-        // Find the strategy that handles this opportunity's exchange pair
+        // Use the strategy_index if available
+        if (opportunity.strategy_index >= 0 && 
+            opportunity.strategy_index < static_cast<int>(strategies_.size())) {
+            return strategies_[opportunity.strategy_index]->calculateOptimalPositionSize(opportunity);
+        }
+        
+        // Fallback to the old method if strategy_index is not set
         for (const auto& strategy : strategies_) {
             auto opportunities = strategy->findOpportunities();
             
@@ -85,7 +110,13 @@ public:
     }
     
     bool executeTrade(const ArbitrageOpportunity& opportunity, double size) override {
-        // Find the strategy that handles this opportunity's exchange pair
+        // Use the strategy_index if available
+        if (opportunity.strategy_index >= 0 && 
+            opportunity.strategy_index < static_cast<int>(strategies_.size())) {
+            return strategies_[opportunity.strategy_index]->executeTrade(opportunity, size);
+        }
+        
+        // Fallback to the old method if strategy_index is not set
         for (const auto& strategy : strategies_) {
             auto opportunities = strategy->findOpportunities();
             
@@ -106,7 +137,13 @@ public:
     }
     
     bool closePosition(const ArbitrageOpportunity& opportunity) override {
-        // Find the strategy that handles this opportunity's exchange pair
+        // Use the strategy_index if available
+        if (opportunity.strategy_index >= 0 && 
+            opportunity.strategy_index < static_cast<int>(strategies_.size())) {
+            return strategies_[opportunity.strategy_index]->closePosition(opportunity);
+        }
+        
+        // Fallback to the old method if strategy_index is not set
         for (const auto& strategy : strategies_) {
             auto opportunities = strategy->findOpportunities();
             

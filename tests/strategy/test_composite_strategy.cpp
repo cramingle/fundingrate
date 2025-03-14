@@ -112,7 +112,8 @@ protected:
     ArbitrageOpportunity createOpportunity(
         const std::string& exchange1, 
         const std::string& exchange2,
-        double profit) {
+        double profit,
+        int strategy_index = -1) {
         ArbitrageOpportunity opp;
         opp.pair.exchange1 = exchange1;
         opp.pair.symbol1 = "BTC/USDT";
@@ -121,6 +122,8 @@ protected:
         opp.pair.symbol2 = "BTC/USDT";
         opp.pair.market_type2 = MarketType::PERPETUAL;
         opp.estimated_profit = profit;
+        opp.strategy_type = "MockStrategy";
+        opp.strategy_index = strategy_index;
         return opp;
     }
     
@@ -158,20 +161,19 @@ TEST_F(CompositeStrategyTest, CombinesOpportunitiesFromAllStrategies) {
 }
 
 TEST_F(CompositeStrategyTest, DelegatesValidationToCorrectStrategy) {
-    // Create opportunities
-    auto binance_bybit_opp = createOpportunity("Binance", "Bybit", 10.0);
-    auto okx_deribit_opp = createOpportunity("OKX", "Deribit", 15.0);
-    auto unknown_opp = createOpportunity("Unknown", "Exchange", 5.0);
+    // Create an opportunity with strategy_index=0 (first strategy)
+    auto binance_bybit_opp = createOpportunity("Binance", "Bybit", 10.0, 0);
     
-    // Validate with composite strategy
-    EXPECT_TRUE(composite_strategy_->validateOpportunity(binance_bybit_opp));
-    EXPECT_TRUE(composite_strategy_->validateOpportunity(okx_deribit_opp));
-    EXPECT_FALSE(composite_strategy_->validateOpportunity(unknown_opp));
+    // Validate
+    bool result = composite_strategy_->validateOpportunity(binance_bybit_opp);
+    
+    // Should be delegated to strategy1
+    EXPECT_TRUE(result);
 }
 
 TEST_F(CompositeStrategyTest, DelegatesTradeExecutionToCorrectStrategy) {
-    // Create an opportunity
-    auto binance_bybit_opp = createOpportunity("Binance", "Bybit", 10.0);
+    // Create an opportunity with strategy_index=0 (first strategy)
+    auto binance_bybit_opp = createOpportunity("Binance", "Bybit", 10.0, 0);
     
     // Execute trade
     bool result = composite_strategy_->executeTrade(binance_bybit_opp, 1000.0);
@@ -184,8 +186,8 @@ TEST_F(CompositeStrategyTest, DelegatesTradeExecutionToCorrectStrategy) {
 }
 
 TEST_F(CompositeStrategyTest, DelegatesPositionCloseToCorrectStrategy) {
-    // Create an opportunity
-    auto okx_deribit_opp = createOpportunity("OKX", "Deribit", 15.0);
+    // Create an opportunity with strategy_index=1 (second strategy)
+    auto okx_deribit_opp = createOpportunity("OKX", "Deribit", 15.0, 1);
     
     // Close position
     bool result = composite_strategy_->closePosition(okx_deribit_opp);

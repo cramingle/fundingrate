@@ -355,6 +355,10 @@ std::vector<ArbitrageOpportunity> CrossExchangePerpStrategy::findOpportunities()
             // Record discovery time
             opportunity.discovery_time = std::chrono::system_clock::now();
             
+            // Set the strategy type
+            opportunity.strategy_type = "CrossExchangePerpStrategy";
+            opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
+            
             // Add to opportunities if estimated profit is positive AFTER transaction costs
             // and the risk score is acceptable
             if (opportunity.estimated_profit > 0 && opportunity.position_risk_score < 75.0) {
@@ -1402,7 +1406,7 @@ void CrossExchangePerpStrategy::monitorPositions() {
                                 
                             if (order2_id.empty()) {
                                 logMessage("CrossExchangePerpStrategy", "Failed to reduce position on " + 
-                                          exchange2_->getName(), true);
+                                          exchange2_->getName() + ", WARNING: HEDGE IMBALANCE", true);
                                 return;
                             }
                             

@@ -155,6 +155,10 @@ std::vector<ArbitrageOpportunity> CrossExchangeSpotPerpStrategy::findOpportuniti
             // Record discovery time
             opportunity.discovery_time = std::chrono::system_clock::now();
             
+            // Set the strategy type
+            opportunity.strategy_type = "CrossExchangeSpotPerpStrategy";
+            opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
+            
             // Add to opportunities if estimated profit is positive AFTER transaction costs
             if (opportunity.estimated_profit > 0) {
                 opportunities.push_back(opportunity);
