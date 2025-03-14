@@ -8,6 +8,10 @@
 #include <thread>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
+#include <iomanip>
+#include <sstream>
 
 namespace funding {
 
@@ -275,8 +279,28 @@ private:
     std::map<std::string, std::pair<double, double>> symbol_fees_; // symbol -> (maker, taker)
     std::chrono::system_clock::time_point last_fee_update_;
     
+    // Generate Binance API signature using HMAC-SHA256
+    std::string generateSignature(const std::string& query_string) {
+        // Create an HMAC-SHA256 signature using the API secret as the key
+        unsigned char* digest = HMAC(EVP_sha256(), 
+                                    api_secret_.c_str(), 
+                                    api_secret_.length(),
+                                    (unsigned char*)query_string.c_str(), 
+                                    query_string.length(), 
+                                    NULL, 
+                                    NULL);
+        
+        // Convert the binary signature to a hex string
+        std::stringstream ss;
+        for (int i = 0; i < 32; i++) {
+            ss << std::hex << std::setw(2) << std::setfill('0') << (int)digest[i];
+        }
+        
+        return ss.str();
+    }
+    
     // Make API call to Binance
-    json makeApiCall(const std::string& endpoint, const std::string& params = "", bool is_private = false) {
+    json makeApiCall(const std::string& endpoint, std::string params = "", bool is_private = false) {
         CURL* curl = curl_easy_init();
         std::string response_string;
         std::string url = base_url_ + endpoint;
@@ -285,7 +309,26 @@ private:
             throw std::runtime_error("Failed to initialize CURL");
         }
         
-        if (params.length() > 0) {
+        // For private API calls, add timestamp and signature
+        if (is_private) {
+            // Add timestamp if not already present
+            if (params.find("timestamp=") == std::string::npos) {
+                std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+                
+                if (!params.empty()) {
+                    params += "&timestamp=" + timestamp;
+                } else {
+                    params = "timestamp=" + timestamp;
+                }
+            }
+            
+            // Generate and add signature
+            std::string signature = generateSignature(params);
+            params += "&signature=" + signature;
+        }
+        
+        if (!params.empty()) {
             url += "?" + params;
         }
         
@@ -317,18 +360,8 @@ private:
     // Update the fee structure from the exchange
     void updateFeeStructure() {
         try {
-            // For authenticated fee info
-            std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-            std::string params = "timestamp=" + timestamp;
-            
-            // Add signature for private API calls
-            // In a real implementation, you would compute HMAC-SHA256 signature here
-            std::string signature = "signature_placeholder";
-            params += "&signature=" + signature;
-            
-            // Get trading fee information
-            json fee_info = makeApiCall("/api/v3/account", params, true);
+            // Get trading fee information - timestamp and signature will be added by makeApiCall
+            json fee_info = makeApiCall("/api/v3/account", "", true);
             
             // Parse maker/taker fees
             fee_structure_.maker_fee = std::stod(fee_info["makerCommission"].get<std::string>()) / 10000.0;
@@ -339,7 +372,7 @@ private:
             fee_structure_.volume_30d_usd = fee_info["commissionRates"]["30dVolume"].get<double>();
             
             // Symbol-specific fees
-            json symbol_fees = makeApiCall("/sapi/v1/asset/tradeFee", params, true);
+            json symbol_fees = makeApiCall("/sapi/v1/asset/tradeFee", "", true);
             for (const auto& symbol_fee : symbol_fees) {
                 std::string symbol = symbol_fee["symbol"];
                 double maker = std::stod(symbol_fee["makerCommission"].get<std::string>());
@@ -348,7 +381,7 @@ private:
             }
             
             // Get withdrawal fees
-            json coins_info = makeApiCall("/sapi/v1/capital/config/getall", params, true);
+            json coins_info = makeApiCall("/sapi/v1/capital/config/getall", "", true);
             for (const auto& coin : coins_info) {
                 std::string currency = coin["coin"];
                 double withdraw_fee = std::stod(coin["withdrawFee"].get<std::string>());

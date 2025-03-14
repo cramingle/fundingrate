@@ -45,6 +45,7 @@ public:
         double max_drawdown;
         double sharpe_ratio;
         double annualized_return;
+        std::vector<double> daily_returns;  // Store daily returns for Sharpe ratio calculation
     };
     
     PerformanceStats getPerformance() const;
@@ -88,6 +89,12 @@ private:
     void loadSavedState();
     void savePerformanceStats();
     void loadPerformanceStats();
+    
+    // Signal handling
+    void setupSignalHandlers();
+    
+    // Performance tracking
+    void addDailyReturn(double return_value);
 };
 
 } // namespace funding 

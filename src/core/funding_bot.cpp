@@ -13,8 +13,11 @@
 #include <ctime>
 #include <csignal>
 #include <filesystem>
+#include <nlohmann/json.hpp>
 
 namespace funding {
+
+using json = nlohmann::json;
 
 // Global mutex for thread-safe logging
 std::mutex g_log_mutex;
@@ -104,9 +107,10 @@ FundingBot::FundingBot(const std::string& config_file)
         performance_.max_drawdown = 0.0;
         performance_.sharpe_ratio = 0.0;
         performance_.annualized_return = 0.0;
+        performance_.daily_returns.clear();
         
         // Set up signal handlers for graceful shutdown
-        // Note: In a real implementation, you'd use a proper signal handling mechanism
+        setupSignalHandlers();
         
     } catch (const std::exception& e) {
         log("Error in FundingBot constructor: " + std::string(e.what()), true);
@@ -614,6 +618,7 @@ void FundingBot::updatePerformanceStats() {
         // Update max drawdown if needed
         double current_equity = performance_.total_profit + unrealized_pnl;
         static double peak_equity = current_equity;
+        static double previous_equity = current_equity;
         
         if (current_equity > peak_equity) {
             peak_equity = current_equity;
@@ -624,25 +629,63 @@ void FundingBot::updatePerformanceStats() {
             }
         }
         
-        // Calculate annualized return
+        // Calculate daily return
         auto now = std::chrono::system_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::hours>(
             now - last_performance_update_).count();
         
+        // If approximately a day has passed (24 hours +/- 1 hour)
+        if (duration >= 23 && duration <= 25) {
+            // Calculate daily return as percentage
+            double daily_return = 0.0;
+            if (previous_equity > 0) {
+                daily_return = (current_equity - previous_equity) / previous_equity * 100.0;
+                
+                // Add to daily returns vector
+                addDailyReturn(daily_return);
+                
+                log("Added daily return: " + formatCurrency(daily_return, 4) + "%");
+            }
+            
+            // Update previous equity for next calculation
+            previous_equity = current_equity;
+        }
+        
+        // Calculate annualized return
         if (duration > 0) {
             double hours_per_year = 24.0 * 365.0;
             double years = duration / hours_per_year;
             
-            if (years > 0) {
+            if (years > 0 && total_position_value > 0) {
                 // Simple annualization formula
                 performance_.annualized_return = 
                     (performance_.total_profit / total_position_value) / years * 100.0;
             }
         }
         
-        // Calculate Sharpe ratio (simplified)
-        // In a real implementation, you would calculate this properly with daily returns
-        if (performance_.max_drawdown > 0) {
+        // Calculate Sharpe ratio properly with daily returns
+        if (!performance_.daily_returns.empty()) {
+            // Calculate average daily return
+            double sum_returns = 0.0;
+            for (const auto& ret : performance_.daily_returns) {
+                sum_returns += ret;
+            }
+            double avg_return = sum_returns / performance_.daily_returns.size();
+            
+            // Calculate standard deviation of daily returns
+            double sum_squared_diff = 0.0;
+            for (const auto& ret : performance_.daily_returns) {
+                double diff = ret - avg_return;
+                sum_squared_diff += diff * diff;
+            }
+            double std_dev = std::sqrt(sum_squared_diff / performance_.daily_returns.size());
+            
+            // Calculate annualized Sharpe ratio (assuming 252 trading days per year)
+            if (std_dev > 0) {
+                performance_.sharpe_ratio = (avg_return / std_dev) * std::sqrt(252.0);
+            }
+        } else if (performance_.max_drawdown > 0) {
+            // Fallback to simplified calculation if no daily returns yet
             performance_.sharpe_ratio = 
                 performance_.annualized_return / performance_.max_drawdown;
         }
@@ -757,9 +800,62 @@ void FundingBot::saveState() {
         // Save active positions
         auto positions = risk_manager_->getActivePositions();
         
-        // In a real implementation, you would serialize the positions to a file
-        // For this example, we'll just log the number of positions saved
-        log("Saved state with " + std::to_string(positions.size()) + " active positions");
+        // Serialize the positions to a file
+        std::string positions_file = "data/positions.json";
+        std::ofstream file(positions_file);
+        
+        if (!file.is_open()) {
+            log("Error: Could not open file for writing: " + positions_file, true);
+            return;
+        }
+        
+        // Create JSON array for positions
+        json positions_json = json::array();
+        
+        for (const auto& position : positions) {
+            // Convert position to JSON
+            json pos_json;
+            pos_json["position_id"] = position.position_id;
+            pos_json["is_active"] = position.is_active;
+            pos_json["position_size"] = position.position_size;
+            
+            // Convert time_point to string
+            auto entry_time_t = std::chrono::system_clock::to_time_t(position.entry_time);
+            std::stringstream ss;
+            ss << std::put_time(std::localtime(&entry_time_t), "%Y-%m-%d %H:%M:%S");
+            pos_json["entry_time"] = ss.str();
+            
+            // Opportunity details
+            json opp_json;
+            opp_json["exchange1"] = position.opportunity.pair.exchange1;
+            opp_json["symbol1"] = position.opportunity.pair.symbol1;
+            opp_json["exchange2"] = position.opportunity.pair.exchange2;
+            opp_json["symbol2"] = position.opportunity.pair.symbol2;
+            opp_json["net_funding_rate"] = position.opportunity.net_funding_rate;
+            opp_json["estimated_profit"] = position.opportunity.estimated_profit;
+            opp_json["entry_price_spread"] = position.opportunity.entry_price_spread;
+            pos_json["opportunity"] = opp_json;
+            
+            // Price information
+            pos_json["entry_price1"] = position.entry_price1;
+            pos_json["entry_price2"] = position.entry_price2;
+            pos_json["current_price1"] = position.current_price1;
+            pos_json["current_price2"] = position.current_price2;
+            pos_json["initial_spread"] = position.initial_spread;
+            pos_json["current_spread"] = position.current_spread;
+            
+            // Performance metrics
+            pos_json["funding_collected"] = position.funding_collected;
+            pos_json["unrealized_pnl"] = position.unrealized_pnl;
+            
+            positions_json.push_back(pos_json);
+        }
+        
+        // Write JSON to file
+        file << positions_json.dump(4);
+        file.close();
+        
+        log("Saved " + std::to_string(positions.size()) + " active positions to " + positions_file);
         
     } catch (const std::exception& e) {
         log("Error saving state: " + std::string(e.what()), true);
@@ -769,12 +865,94 @@ void FundingBot::saveState() {
 // Load saved state
 void FundingBot::loadSavedState() {
     try {
-        // In a real implementation, you would deserialize the state from a file
-        // For this example, we'll just log that we're loading state
         log("Loading saved state...");
         
         // Load performance stats
         loadPerformanceStats();
+        
+        // Load positions from file
+        std::string positions_file = "data/positions.json";
+        
+        // Check if file exists
+        if (!std::filesystem::exists(positions_file)) {
+            log("No saved positions file found at: " + positions_file);
+            return;
+        }
+        
+        // Open and read the file
+        std::ifstream file(positions_file);
+        if (!file.is_open()) {
+            log("Error: Could not open positions file: " + positions_file, true);
+            return;
+        }
+        
+        // Parse JSON
+        json positions_json;
+        try {
+            file >> positions_json;
+        } catch (const json::parse_error& e) {
+            log("Error parsing positions file: " + std::string(e.what()), true);
+            return;
+        }
+        
+        // Check if JSON is an array
+        if (!positions_json.is_array()) {
+            log("Error: Positions file does not contain a valid JSON array", true);
+            return;
+        }
+        
+        // Deserialize positions
+        std::vector<ArbitragePosition> positions;
+        
+        for (const auto& pos_json : positions_json) {
+            ArbitragePosition position;
+            
+            // Basic position info
+            position.position_id = pos_json["position_id"];
+            position.is_active = pos_json["is_active"];
+            position.position_size = pos_json["position_size"];
+            
+            // Parse entry time
+            std::tm tm = {};
+            std::string entry_time_str = pos_json["entry_time"].get<std::string>();
+            std::stringstream ss(entry_time_str);
+            ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+            position.entry_time = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+            
+            // Opportunity details
+            const auto& opp_json = pos_json["opportunity"];
+            position.opportunity.pair.exchange1 = opp_json["exchange1"];
+            position.opportunity.pair.symbol1 = opp_json["symbol1"];
+            position.opportunity.pair.exchange2 = opp_json["exchange2"];
+            position.opportunity.pair.symbol2 = opp_json["symbol2"];
+            position.opportunity.net_funding_rate = opp_json["net_funding_rate"];
+            position.opportunity.estimated_profit = opp_json["estimated_profit"];
+            position.opportunity.entry_price_spread = opp_json["entry_price_spread"];
+            
+            // Price information
+            position.entry_price1 = pos_json["entry_price1"];
+            position.entry_price2 = pos_json["entry_price2"];
+            position.current_price1 = pos_json["current_price1"];
+            position.current_price2 = pos_json["current_price2"];
+            position.initial_spread = pos_json["initial_spread"];
+            position.current_spread = pos_json["current_spread"];
+            
+            // Performance metrics
+            position.funding_collected = pos_json["funding_collected"];
+            position.unrealized_pnl = pos_json["unrealized_pnl"];
+            
+            // Add to positions vector
+            positions.push_back(position);
+        }
+        
+        // Register positions with risk manager
+        for (const auto& position : positions) {
+            if (position.is_active) {
+                risk_manager_->registerPosition(position);
+            }
+        }
+        
+        log("Loaded " + std::to_string(positions.size()) + " positions from " + positions_file);
         
     } catch (const std::exception& e) {
         log("Error loading saved state: " + std::string(e.what()), true);
@@ -787,9 +965,43 @@ void FundingBot::savePerformanceStats() {
         // Ensure directory exists
         std::filesystem::create_directories("data");
         
-        // In a real implementation, you would serialize the performance stats to a file
-        // For this example, we'll just log that we're saving performance stats
-        log("Saving performance statistics...");
+        // Serialize performance stats to a file
+        std::string stats_file = "data/performance.json";
+        std::ofstream file(stats_file);
+        
+        if (!file.is_open()) {
+            log("Error: Could not open file for writing: " + stats_file, true);
+            return;
+        }
+        
+        // Create JSON object for performance stats
+        json stats_json;
+        stats_json["total_trades"] = performance_.total_trades;
+        stats_json["profitable_trades"] = performance_.profitable_trades;
+        stats_json["total_profit"] = performance_.total_profit;
+        stats_json["max_drawdown"] = performance_.max_drawdown;
+        stats_json["sharpe_ratio"] = performance_.sharpe_ratio;
+        stats_json["annualized_return"] = performance_.annualized_return;
+        
+        // Add daily returns
+        json daily_returns_json = json::array();
+        for (const auto& ret : performance_.daily_returns) {
+            daily_returns_json.push_back(ret);
+        }
+        stats_json["daily_returns"] = daily_returns_json;
+        
+        // Add timestamp
+        auto now = std::chrono::system_clock::now();
+        auto now_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&now_t), "%Y-%m-%d %H:%M:%S");
+        stats_json["last_updated"] = ss.str();
+        
+        // Write JSON to file
+        file << stats_json.dump(4);
+        file.close();
+        
+        log("Saved performance statistics to " + stats_file);
         
     } catch (const std::exception& e) {
         log("Error saving performance stats: " + std::string(e.what()), true);
@@ -799,12 +1011,67 @@ void FundingBot::savePerformanceStats() {
 // Load performance statistics
 void FundingBot::loadPerformanceStats() {
     try {
-        // In a real implementation, you would deserialize the performance stats from a file
-        // For this example, we'll just log that we're loading performance stats
-        log("Loading performance statistics...");
+        // Check if file exists
+        std::string stats_file = "data/performance.json";
+        
+        if (!std::filesystem::exists(stats_file)) {
+            log("No saved performance stats file found at: " + stats_file);
+            return;
+        }
+        
+        // Open and read the file
+        std::ifstream file(stats_file);
+        if (!file.is_open()) {
+            log("Error: Could not open performance stats file: " + stats_file, true);
+            return;
+        }
+        
+        // Parse JSON
+        json stats_json;
+        try {
+            file >> stats_json;
+        } catch (const json::parse_error& e) {
+            log("Error parsing performance stats file: " + std::string(e.what()), true);
+            return;
+        }
+        
+        // Deserialize performance stats
+        performance_.total_trades = stats_json["total_trades"];
+        performance_.profitable_trades = stats_json["profitable_trades"];
+        performance_.total_profit = stats_json["total_profit"];
+        performance_.max_drawdown = stats_json["max_drawdown"];
+        performance_.sharpe_ratio = stats_json["sharpe_ratio"];
+        performance_.annualized_return = stats_json["annualized_return"];
+        
+        // Load daily returns
+        performance_.daily_returns.clear();
+        for (const auto& ret : stats_json["daily_returns"]) {
+            performance_.daily_returns.push_back(ret);
+        }
+        
+        log("Loaded performance statistics from " + stats_file);
         
     } catch (const std::exception& e) {
         log("Error loading performance stats: " + std::string(e.what()), true);
+    }
+}
+
+// Setup signal handlers for proper shutdown
+void FundingBot::setupSignalHandlers() {
+    log("Setting up signal handlers for graceful shutdown");
+    
+    // We don't directly set signal handlers here because this is a library
+    // The main application should set up signal handlers that call stop()
+    // This is just a placeholder to indicate that signal handling is important
+}
+
+// Add a daily return to the performance stats
+void FundingBot::addDailyReturn(double return_value) {
+    performance_.daily_returns.push_back(return_value);
+    
+    // Keep only the last year of daily returns (252 trading days)
+    if (performance_.daily_returns.size() > 252) {
+        performance_.daily_returns.erase(performance_.daily_returns.begin());
     }
 }
 
