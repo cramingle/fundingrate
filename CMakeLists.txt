@@ -10,6 +10,7 @@ option(BUILD_TESTING "Build the testing tree" ON)
 # Third-party dependencies
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Find or fetch nlohmann_json if not found
 find_package(nlohmann_json QUIET)
@@ -37,6 +38,7 @@ target_link_libraries(funding_core PUBLIC
     Threads::Threads
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    OpenSSL::Crypto
 )
 
 # Main executable

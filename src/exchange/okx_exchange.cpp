@@ -19,7 +19,7 @@ namespace funding {
 using json = nlohmann::json;
 
 // Helper function for CURL responses
-size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
     size_t newLength = size * nmemb;
     try {
         s->append((char*)contents, newLength);
