@@ -119,7 +119,7 @@ private:
 std::unique_ptr<ArbitrageStrategy> createStrategy(
     const std::string& strategy_type,
     const std::vector<std::shared_ptr<ExchangeInterface>>& exchanges,
-    double min_funding_rate = 0.0001,
-    double min_expected_profit = 1.0);
+    double min_funding_rate,
+    double min_expected_profit);
 
 } // namespace funding 
