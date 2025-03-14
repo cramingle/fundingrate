@@ -1,0 +1,67 @@
+#!/bin/bash
+# Script to compare console output and log file for Funding Rate Bot
+# Usage: ./compare_outputs [config_file]
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Set default config file
+CONFIG_FILE="config/bot_config.json"
+
+# Parse command line arguments
+if [ $# -gt 0 ]; then
+    CONFIG_FILE="$1"
+fi
+
+# Check if config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}Config file not found: ${CONFIG_FILE}${NC}"
+    exit 1
+fi
+
+# Today's date for log file
+TODAY=$(date +"%Y-%m-%d")
+LOG_FILE="build/logs/funding_bot_${TODAY}.log"
+
+# Create temporary files
+CONSOLE_OUTPUT=$(mktemp)
+LOG_TAIL=$(mktemp)
+
+# Display header
+echo -e "${GREEN}=========================================${NC}"
+echo -e "${GREEN}   Funding Bot Output Comparison   ${NC}"
+echo -e "${GREEN}=========================================${NC}"
+echo -e "${YELLOW}Config: ${CONFIG_FILE}${NC}"
+echo -e "${YELLOW}Log: ${LOG_FILE}${NC}"
+echo -e "${GREEN}=========================================${NC}"
+
+# Run the bot and capture console output (for 10 seconds)
+echo -e "${BLUE}Running bot and capturing output for 10 seconds...${NC}"
+cd build && timeout 10s ./funding_bot -c "../${CONFIG_FILE}" > "$CONSOLE_OUTPUT" 2>&1
+
+# Check if log file exists
+if [ ! -f "$LOG_FILE" ]; then
+    echo -e "${RED}Log file not created: ${LOG_FILE}${NC}"
+    echo -e "${YELLOW}Console output:${NC}"
+    cat "$CONSOLE_OUTPUT"
+    rm "$CONSOLE_OUTPUT" "$LOG_TAIL"
+    exit 1
+fi
+
+# Capture the tail of the log file (approximately same number of lines)
+LINES=$(wc -l < "$CONSOLE_OUTPUT")
+tail -n "$LINES" "$LOG_FILE" > "$LOG_TAIL"
+
+# Show differences
+echo -e "${GREEN}=========================================${NC}"
+echo -e "${YELLOW}CONSOLE OUTPUT (left) vs LOG FILE (right):${NC}"
+echo -e "${GREEN}=========================================${NC}"
+sdiff -w 150 "$CONSOLE_OUTPUT" "$LOG_TAIL" | less
+
+# Clean up
+rm "$CONSOLE_OUTPUT" "$LOG_TAIL"
+echo -e "${GREEN}Comparison complete.${NC}" 

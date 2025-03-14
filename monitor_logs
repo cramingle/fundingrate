@@ -1,0 +1,40 @@
+#!/bin/bash
+# Log monitoring script for Funding Rate Arbitrage Bot
+# Usage: ./monitor_logs [date]
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Set default date to today
+DATE=$(date +"%Y-%m-%d")
+
+# Parse command line arguments for date
+if [ $# -gt 0 ]; then
+    DATE="$1"
+fi
+
+# Log file path
+LOG_FILE="build/logs/funding_bot_${DATE}.log"
+
+# Display header
+echo -e "${GREEN}=========================================${NC}"
+echo -e "${GREEN}   Funding Rate Bot Log Monitor   ${NC}"
+echo -e "${GREEN}=========================================${NC}"
+
+# Check if log file exists
+if [ ! -f "$LOG_FILE" ]; then
+    echo -e "${RED}Log file not found: ${LOG_FILE}${NC}"
+    echo -e "${YELLOW}Available log files:${NC}"
+    find build/logs -name "funding_bot_*.log" -type f | sort
+    exit 1
+fi
+
+echo -e "${YELLOW}Monitoring log file: ${LOG_FILE}${NC}"
+echo -e "${YELLOW}Press Ctrl+C to stop monitoring${NC}"
+echo -e "${GREEN}=========================================${NC}"
+
+# Monitor log file (tail with follow)
+tail -f "$LOG_FILE" 
