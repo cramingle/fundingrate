@@ -112,11 +112,11 @@ KuCoinExchange::KuCoinExchange(const ExchangeConfig& config) :
     last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
     
     if (use_testnet_) {
-        // Use the actual KuCoin API URL even for testnet
-        base_url_ = "https://openapi-v2.kucoin.com";
+        // Use the sandbox URL for testnet
+        base_url_ = "https://openapi-sandbox.kucoin.com";
     } else {
-        // Use the correct KuCoin API URL
-        base_url_ = "https://openapi-v2.kucoin.com";
+        // Use the production URL
+        base_url_ = "https://api.kucoin.com";
     }
     
     // Initialize CURL
