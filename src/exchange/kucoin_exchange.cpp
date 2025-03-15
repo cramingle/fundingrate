@@ -720,14 +720,15 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
         json response = makeApiCall(endpoint, "", false, "GET", true);
         
         // Parse response
-        if (response["code"] == "200000" && response.contains("data") && response["data"].is_array() && !response["data"].empty()) {
+        if (response.contains("code") && response.at("code") == "200000" && 
+            response.contains("data") && response.at("data").is_array() && !response.at("data").empty()) {
             // Get the most recent funding rate (first in the list)
-            auto& funding_data = response["data"][0];
+            auto& funding_data = response.at("data").at(0);
             
             // Parse funding rate
             if (funding_data.contains("fundingRate")) {
                 // The fundingRate is always returned as a number
-                rate.rate = funding_data["fundingRate"].get<double>();
+                rate.rate = funding_data.at("fundingRate").get<double>();
             } else {
                 throw std::runtime_error("Funding rate value not found for symbol: " + symbol);
             }
@@ -735,7 +736,7 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
             // Parse funding time
             if (funding_data.contains("timepoint")) {
                 // The timepoint is always returned as a number (milliseconds)
-                int64_t funding_time_ms = funding_data["timepoint"].get<int64_t>();
+                int64_t funding_time_ms = funding_data.at("timepoint").get<int64_t>();
                 
                 // Set the last funding time
                 auto last_funding_time = std::chrono::system_clock::from_time_t(funding_time_ms / 1000);
@@ -756,7 +757,7 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
         } else {
             std::string error_msg = "Failed to get funding rate: ";
             if (response.contains("msg")) {
-                error_msg += response["msg"].get<std::string>();
+                error_msg += response.at("msg").get<std::string>();
             } else {
                 error_msg += "Unknown error";
             }
@@ -766,11 +767,11 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
     } catch (const std::exception& e) {
         std::cerr << "Error in KuCoinExchange::getFundingRate: " << e.what() << std::endl;
         
-        // Set default values on error
+        // Set default values
         rate.rate = 0.0;
-        rate.predicted_rate = 0.0;
-        rate.payment_interval = std::chrono::hours(8);
         rate.next_payment = calculateNextFundingTime();
+        rate.payment_interval = std::chrono::hours(8);
+        rate.predicted_rate = 0.0;
     }
     
     return rate;

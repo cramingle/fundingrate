@@ -258,142 +258,120 @@ public:
     }
     
     FundingRate getFundingRate(const std::string& symbol) override {
-        FundingRate rate;
-        rate.symbol = symbol;
+        FundingRate funding;
+        funding.symbol = symbol;
         
         try {
-            std::string endpoint = "/v5/market/funding/history?category=linear&symbol=" + symbol + "&limit=1";
-            json response;
+            // Construct the API endpoint for funding rate
+            std::string endpoint = "/v5/market/funding/history?category=linear&symbol=" + symbol;
+            json response = makeApiCall(endpoint);
             
-            try {
-                response = makeApiCall(endpoint, "", false);
-            } catch (const std::exception& e) {
-                std::cerr << "Error making API call for funding rate: " << e.what() << std::endl;
-                
-                // Set default values on error
-                rate.rate = 0.0;
-                rate.next_payment = calculateNextFundingTime();
-                rate.payment_interval = std::chrono::hours(8);
-                rate.predicted_rate = 0.0;
-                return rate;
-            }
-            
-            // Check if response is valid and contains the expected fields
+            // Check if the response is valid
             if (!response.is_object()) {
-                std::cerr << "Invalid response format for funding rate (not an object)" << std::endl;
-                throw std::runtime_error("Invalid response format");
+                throw std::runtime_error("Invalid response format: not an object");
             }
             
+            // Check if the response contains the retCode field
             if (!response.contains("retCode")) {
-                std::cerr << "Response missing retCode field" << std::endl;
-                throw std::runtime_error("Missing retCode field");
+                throw std::runtime_error("Invalid response format: missing retCode field");
             }
             
-            // Check for API error
-            if (response["retCode"] != 0) {
-                std::string error_msg = "API error";
+            // Check if the API call was successful
+            if (response.at("retCode") != 0) {
+                std::string error_msg = "API error: ";
                 if (response.contains("retMsg")) {
-                    error_msg += ": " + response["retMsg"].get<std::string>();
+                    error_msg += response.at("retMsg").get<std::string>();
+                } else {
+                    error_msg += "Unknown error";
                 }
-                std::cerr << "Bybit API error for funding rate: " << error_msg << std::endl;
                 throw std::runtime_error(error_msg);
             }
             
-            // Check if result field exists
+            // Set default values in case we can't parse the response
+            funding.rate = 0.0;
+            funding.predicted_rate = 0.0;
+            funding.payment_interval = std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
+            
+            // Check if the response contains the result field
             if (!response.contains("result")) {
-                std::cerr << "Response missing result field" << std::endl;
-                throw std::runtime_error("Missing result field");
+                throw std::runtime_error("Invalid response format: missing result field");
             }
             
-            // Check if list field exists in result
-            if (!response["result"].contains("list")) {
-                std::cerr << "Response missing list field in result" << std::endl;
-                throw std::runtime_error("Missing list field");
+            // Get the result object
+            const auto& result = response.at("result");
+            
+            // Check if the result contains the list field
+            if (!result.contains("list")) {
+                throw std::runtime_error("Invalid response format: missing list field in result");
             }
             
-            // Check if list is empty
-            if (response["result"]["list"].empty()) {
-                std::cerr << "Empty funding rate list for " << symbol << std::endl;
-                throw std::runtime_error("Empty funding rate list");
+            // Get the funding rate list
+            const auto& list = result.at("list");
+            
+            // Check if the list is empty
+            if (list.empty()) {
+                throw std::runtime_error("No funding rate data available");
             }
             
-            // Get the first (most recent) funding rate
-            auto& funding_info = response["result"]["list"][0];
+            // Get the most recent funding rate
+            const auto& latest = list[0];
             
-            // Get current funding rate
-            if (!funding_info.contains("fundingRate")) {
-                std::cerr << "Funding info missing fundingRate field" << std::endl;
-                throw std::runtime_error("Missing fundingRate field");
+            // Parse the funding rate
+            if (latest.contains("fundingRate")) {
+                std::string rate_str = latest.at("fundingRate").get<std::string>();
+                funding.rate = std::stod(rate_str);
             }
             
-            if (funding_info["fundingRate"].is_string()) {
-                rate.rate = std::stod(funding_info["fundingRate"].get<std::string>());
-            } else if (funding_info["fundingRate"].is_number()) {
-                rate.rate = funding_info["fundingRate"].get<double>();
+            // Parse the funding rate timestamp
+            if (latest.contains("fundingRateTimestamp")) {
+                // The timestamp can be either a string or a number
+                int64_t timestamp = 0;
+                
+                if (latest.at("fundingRateTimestamp").is_string()) {
+                    timestamp = std::stoll(latest.at("fundingRateTimestamp").get<std::string>());
+                } else if (latest.at("fundingRateTimestamp").is_number()) {
+                    timestamp = latest.at("fundingRateTimestamp").get<int64_t>();
+                } else {
+                    // If it's neither a string nor a number, use current timestamp
+                    timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
+                }
+                
+                // Calculate the next funding time (8 hours after the last funding)
+                auto funding_time = std::chrono::system_clock::from_time_t(timestamp / 1000);
+                funding.next_payment = calculateNextFundingTime();
             } else {
-                std::cerr << "fundingRate is neither a string nor a number" << std::endl;
-                rate.rate = 0.0;
+                // If no timestamp is available, set the next payment to 8 hours from now
+                funding.next_payment = calculateNextFundingTime();
             }
             
-            // Bybit funding occurs every 8 hours
-            rate.payment_interval = std::chrono::hours(8);
-            
-            // Get next funding time
-            if (funding_info.contains("fundingRateTimestamp")) {
+            // Try to get the predicted funding rate if available
+            if (latest.contains("predictedFundingRate")) {
                 try {
-                    int64_t timestamp = 0;
-                    
-                    if (funding_info["fundingRateTimestamp"].is_string()) {
-                        timestamp = std::stoll(funding_info["fundingRateTimestamp"].get<std::string>());
-                    } else if (funding_info["fundingRateTimestamp"].is_number()) {
-                        timestamp = funding_info["fundingRateTimestamp"].get<int64_t>();
-                    } else {
-                        std::cerr << "fundingRateTimestamp is neither a string nor a number" << std::endl;
-                        timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count();
-                    }
-                    
-                    // Calculate next funding time (current timestamp + 8 hours)
-                    auto next_funding = timestamp + (8 * 60 * 60 * 1000);
-                    rate.next_payment = std::chrono::system_clock::from_time_t(next_funding / 1000);
+                    std::string predicted_rate_str = latest.at("predictedFundingRate").get<std::string>();
+                    funding.predicted_rate = std::stod(predicted_rate_str);
                 } catch (const std::exception& e) {
-                    std::cerr << "Error parsing fundingRateTimestamp: " << e.what() << std::endl;
-                    rate.next_payment = calculateNextFundingTime();
+                    // If we can't parse the predicted rate, use the current rate
+                    funding.predicted_rate = funding.rate;
                 }
             } else {
-                // Calculate next funding time based on Bybit's schedule
-                rate.next_payment = calculateNextFundingTime();
+                // If no predicted rate is available, use the current rate
+                funding.predicted_rate = funding.rate;
             }
             
-            // Get predicted next funding rate if available
-            if (funding_info.contains("predictedFundingRate")) {
-                try {
-                    if (funding_info["predictedFundingRate"].is_string()) {
-                        rate.predicted_rate = std::stod(funding_info["predictedFundingRate"].get<std::string>());
-                    } else if (funding_info["predictedFundingRate"].is_number()) {
-                        rate.predicted_rate = funding_info["predictedFundingRate"].get<double>();
-                    } else {
-                        std::cerr << "predictedFundingRate is neither a string nor a number" << std::endl;
-                        rate.predicted_rate = rate.rate; // Use current rate as fallback
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "Error parsing predictedFundingRate: " << e.what() << std::endl;
-                    rate.predicted_rate = rate.rate; // Use current rate as fallback
-                }
-            } else {
-                rate.predicted_rate = rate.rate; // Use current rate as prediction
-            }
         } catch (const std::exception& e) {
-            std::cerr << "Error processing funding rate for " << symbol << ": " << e.what() << std::endl;
+            std::cerr << "Error fetching funding rate from Bybit: " << e.what() << std::endl;
             
-            // Set default values
-            rate.rate = 0.0;
-            rate.next_payment = calculateNextFundingTime();
-            rate.payment_interval = std::chrono::hours(8);
-            rate.predicted_rate = 0.0;
+            // Set default values for funding rate
+            funding.rate = 0.0;
+            funding.predicted_rate = 0.0;
+            funding.payment_interval = std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
         }
         
-        return rate;
+        return funding;
     }
     
     // Fee information

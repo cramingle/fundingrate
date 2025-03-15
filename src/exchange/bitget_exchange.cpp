@@ -352,12 +352,12 @@ public:
             std::string endpoint = "/api/mix/v1/market/ticker?symbol=" + modified_symbol;
             json response = makeApiCall(endpoint, "", false);
             
-            if (response["code"] == "00000" && response.contains("data")) {
-                auto& data = response["data"];
+            if (response.contains("code") && response.at("code") == "00000" && response.contains("data")) {
+                auto& data = response.at("data");
                 
                 // Parse current funding rate
                 if (data.contains("fundingRate")) {
-                    std::string rate_str = data["fundingRate"].get<std::string>();
+                    std::string rate_str = data.at("fundingRate").get<std::string>();
                     funding.rate = std::stod(rate_str);
                     std::cout << "Parsed funding rate for " << modified_symbol << ": " << funding.rate << std::endl;
                 } else {
@@ -376,7 +376,7 @@ public:
             } else {
                 std::string error_msg = "Failed to get funding rate: ";
                 if (response.contains("msg")) {
-                    error_msg += response["msg"].get<std::string>();
+                    error_msg += response.at("msg").get<std::string>();
                 } else {
                     error_msg += "Unknown error";
                 }

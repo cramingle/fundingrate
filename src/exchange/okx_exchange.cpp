@@ -88,26 +88,39 @@ public:
         json response = makeApiCall(endpoint, "", false);
         
         try {
-            if (response["code"] == "0" && response["data"].is_array()) {
-                for (const auto& instrument : response["data"]) {
-                    if (instrument["state"] == "live") {
+            if (response.contains("code") && response.at("code") == "0" && 
+                response.contains("data") && response.at("data").is_array()) {
+                for (const auto& instrument : response.at("data")) {
+                    if (instrument.contains("state") && instrument.at("state") == "live" &&
+                        instrument.contains("instId") && instrument.contains("baseCcy") && 
+                        instrument.contains("quoteCcy")) {
                         Instrument inst;
-                        inst.symbol = instrument["instId"];
+                        inst.symbol = instrument.at("instId");
                         
                         // OKX uses different naming - baseCcy/quoteCcy
-                        inst.base_currency = instrument["baseCcy"];
-                        inst.quote_currency = instrument["quoteCcy"];
+                        inst.base_currency = instrument.at("baseCcy");
+                        inst.quote_currency = instrument.at("quoteCcy");
                         inst.market_type = type;
                         
                         // Lot size info - min/max trade size
-                        inst.min_order_size = std::stod(instrument["minSz"].get<std::string>());
-                        inst.min_qty = inst.min_order_size; // Alias
-                        inst.max_qty = std::stod(instrument["maxSz"].get<std::string>());
+                        if (instrument.contains("minSz")) {
+                            inst.min_order_size = std::stod(instrument.at("minSz").get<std::string>());
+                            inst.min_qty = inst.min_order_size; // Alias
+                        }
+                        
+                        if (instrument.contains("maxSz")) {
+                            inst.max_qty = std::stod(instrument.at("maxSz").get<std::string>());
+                        }
                         
                         // Price precision
-                        inst.tick_size = std::stod(instrument["tickSz"].get<std::string>());
-                        inst.price_precision = std::stod(instrument["lotSz"].get<std::string>());
-                        inst.qty_precision = std::stod(instrument["lotSz"].get<std::string>());
+                        if (instrument.contains("tickSz")) {
+                            inst.tick_size = std::stod(instrument.at("tickSz").get<std::string>());
+                        }
+                        
+                        if (instrument.contains("lotSz")) {
+                            inst.price_precision = std::stod(instrument.at("lotSz").get<std::string>());
+                            inst.qty_precision = std::stod(instrument.at("lotSz").get<std::string>());
+                        }
                         
                         instruments.push_back(inst);
                     }
@@ -138,27 +151,44 @@ public:
             // Make API call
             json response = makeApiCall(endpoint);
             
-            // Parse response
-            if (response["code"] == "0" && response.contains("data") && !response["data"].empty()) {
-                auto& data = response["data"][0];
-                
-                if (data.contains("last")) {
-                    return std::stod(data["last"].get<std::string>());
-                } else {
-                    throw std::runtime_error("Price data not found for symbol: " + symbol);
-                }
-            } else {
-                std::string error_msg = "Failed to get price: ";
+            // Check if the response is valid
+            if (!response.is_object()) {
+                throw std::runtime_error("Invalid response format: not an object");
+            }
+            
+            // Check if the response contains the code field
+            if (!response.contains("code")) {
+                throw std::runtime_error("Invalid response format: missing code field");
+            }
+            
+            // Check if the response was successful
+            if (response.at("code") != "0") {
+                std::string error_msg = "API error: code " + response.at("code").get<std::string>();
                 if (response.contains("msg")) {
-                    error_msg += response["msg"].get<std::string>();
-                } else {
-                    error_msg += "Unknown error";
+                    error_msg += ", message: " + response.at("msg").get<std::string>();
                 }
                 throw std::runtime_error(error_msg);
             }
+            
+            // Check if the response contains the data field
+            if (!response.contains("data") || !response.at("data").is_array() || response.at("data").empty()) {
+                throw std::runtime_error("Invalid response format: missing or invalid data field");
+            }
+            
+            // Get the first data item
+            const auto& data = response.at("data").at(0);
+            
+            // Check if the data contains the last field
+            if (!data.contains("last")) {
+                throw std::runtime_error("Price data not found for symbol: " + symbol);
+            }
+            
+            // Parse and return the price
+            return std::stod(data.at("last").get<std::string>());
+            
         } catch (const std::exception& e) {
-            std::cerr << "Error fetching price for " << symbol << ": " << e.what() << std::endl;
-            throw;
+            std::cerr << "Error fetching price from OKX for " << symbol << ": " << e.what() << std::endl;
+            return 0.0;
         }
     }
     
@@ -201,97 +231,60 @@ public:
         funding.symbol = symbol;
         
         try {
-            // Store original base URL to restore it in case of error
-            std::string original_base_url = base_url_;
+            // Construct the API endpoint for funding rate
+            std::string endpoint = "/api/v5/public/funding-rate?instId=" + symbol;
+            json response = makeApiCall(endpoint);
             
-            // Convert symbol format if needed (e.g., BTCUSDT to BTC-USDT-SWAP)
-            std::string okx_symbol = symbol;
-            if (symbol.find("-") == std::string::npos) {
-                // If the symbol doesn't contain a hyphen, try to insert one
-                size_t pos = symbol.find("USDT");
-                if (pos != std::string::npos) {
-                    okx_symbol = symbol.substr(0, pos) + "-" + symbol.substr(pos);
-                }
+            // Check if the response is valid
+            if (!response.is_object()) {
+                throw std::runtime_error("Invalid response format: not an object");
             }
             
-            // Add SWAP suffix if not present
-            if (okx_symbol.find("SWAP") == std::string::npos) {
-                okx_symbol += "-SWAP";
+            // Check if the response contains the code field
+            if (!response.contains("code")) {
+                throw std::runtime_error("Invalid response format: missing code field");
             }
             
-            // Endpoint for getting funding rate information
-            std::string endpoint = "/api/v5/public/funding-rate?instId=" + okx_symbol;
-            
-            // Make API call with error handling
-            json response;
-            try {
-                response = makeApiCall(endpoint);
-            } catch (const std::exception& e) {
-                std::cerr << "Error making API call for funding rate: " << e.what() << std::endl;
-                
-                // Restore original base URL if it was changed
-                base_url_ = original_base_url;
-                
-                // Set default values on error
-                funding.rate = 0.0;
-                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                funding.payment_interval = std::chrono::hours(8);
-                funding.predicted_rate = 0.0;
-                return funding;
-            }
-            
-            // Check if response is empty or null
-            if (response.is_null() || response.empty()) {
-                std::cerr << "Empty or null response for funding rate" << std::endl;
-                funding.rate = 0.0;
-                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                funding.payment_interval = std::chrono::hours(8);
-                funding.predicted_rate = 0.0;
-                return funding;
-            }
-            
-            // Check for error messages in the response
-            if (response.contains("code") && response["code"] != "0") {
-                std::string error_msg = "Failed to get funding rate: ";
+            // Check if the API call was successful
+            if (response.at("code") != "0") {
+                std::string error_msg = "API error: ";
                 if (response.contains("msg")) {
-                    error_msg += response["msg"].get<std::string>();
+                    error_msg += response.at("msg").get<std::string>();
                 } else {
-                    error_msg += "Error code " + response["code"].get<std::string>();
+                    error_msg += "Unknown error";
                 }
-                std::cerr << error_msg << std::endl;
-                
-                // Set default values on error
-                funding.rate = 0.0;
-                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                funding.payment_interval = std::chrono::hours(8);
-                funding.predicted_rate = 0.0;
-                return funding;
+                throw std::runtime_error(error_msg);
             }
             
-            // Check if data field exists and is not empty
-            if (!response.contains("data") || !response["data"].is_array() || response["data"].empty()) {
-                std::cerr << "Response does not contain valid data array for funding rate" << std::endl;
-                funding.rate = 0.0;
-                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                funding.payment_interval = std::chrono::hours(8);
-                funding.predicted_rate = 0.0;
-                return funding;
+            // Set default values in case we can't parse the response
+            funding.rate = 0.0;
+            funding.predicted_rate = 0.0;
+            funding.payment_interval = std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
+            
+            // Check if the response contains the data field
+            if (!response.contains("data")) {
+                throw std::runtime_error("Invalid response format: missing data field");
             }
             
-            // Safely access the first data element
-            auto& data = response["data"][0];
+            // Get the data array
+            const auto& data_array = response.at("data");
             
-            // Parse current funding rate with type checking
+            // Check if the data array is empty
+            if (data_array.empty()) {
+                throw std::runtime_error("No funding rate data available");
+            }
+            
+            // Get the first (most recent) funding rate data
+            const auto& data = data_array.at(0);
+            
+            // Parse the funding rate
             if (data.contains("fundingRate")) {
-                if (data["fundingRate"].is_string()) {
-                    try {
-                        funding.rate = std::stod(data["fundingRate"].get<std::string>());
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error parsing fundingRate: " << e.what() << std::endl;
-                        funding.rate = 0.0;
-                    }
-                } else if (data["fundingRate"].is_number()) {
-                    funding.rate = data["fundingRate"].get<double>();
+                if (data.at("fundingRate").is_string()) {
+                    std::string rate_str = data.at("fundingRate").get<std::string>();
+                    funding.rate = std::stod(rate_str);
+                } else if (data.at("fundingRate").is_number()) {
+                    funding.rate = data.at("fundingRate").get<double>();
                 } else {
                     std::cerr << "fundingRate is neither a string nor a number" << std::endl;
                     funding.rate = 0.0;
@@ -303,9 +296,9 @@ public:
             
             // Parse next funding time with type checking
             if (data.contains("nextFundingTime")) {
-                if (data["nextFundingTime"].is_string()) {
+                if (data.at("nextFundingTime").is_string()) {
                     try {
-                        std::string time_str = data["nextFundingTime"].get<std::string>();
+                        std::string time_str = data.at("nextFundingTime").get<std::string>();
                         int64_t next_time_ms = std::stoll(time_str);
                         funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
                     } catch (const std::exception& e) {
@@ -313,8 +306,8 @@ public:
                         // Calculate next funding time based on OKX's schedule (00:00, 08:00, 16:00 UTC)
                         funding.next_payment = calculateNextFundingTime();
                     }
-                } else if (data["nextFundingTime"].is_number()) {
-                    int64_t next_time_ms = data["nextFundingTime"].get<int64_t>();
+                } else if (data.at("nextFundingTime").is_number()) {
+                    int64_t next_time_ms = data.at("nextFundingTime").get<int64_t>();
                     funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
                 } else {
                     std::cerr << "nextFundingTime is neither a string nor a number" << std::endl;
@@ -332,35 +325,28 @@ public:
             
             // Parse predicted funding rate with type checking
             if (data.contains("nextFundingRate")) {
-                if (data["nextFundingRate"].is_string()) {
-                    if (!data["nextFundingRate"].get<std::string>().empty()) {
-                        try {
-                            funding.predicted_rate = std::stod(data["nextFundingRate"].get<std::string>());
-                        } catch (const std::exception& e) {
-                            std::cerr << "Error parsing nextFundingRate: " << e.what() << std::endl;
-                            funding.predicted_rate = funding.rate;
-                        }
-                    } else {
-                        funding.predicted_rate = funding.rate;
-                    }
-                } else if (data["nextFundingRate"].is_number()) {
-                    funding.predicted_rate = data["nextFundingRate"].get<double>();
+                if (data.at("nextFundingRate").is_string()) {
+                    std::string rate_str = data.at("nextFundingRate").get<std::string>();
+                    funding.predicted_rate = std::stod(rate_str);
+                } else if (data.at("nextFundingRate").is_number()) {
+                    funding.predicted_rate = data.at("nextFundingRate").get<double>();
                 } else {
                     std::cerr << "nextFundingRate is neither a string nor a number" << std::endl;
-                    funding.predicted_rate = funding.rate;
+                    funding.predicted_rate = funding.rate; // Use current rate as fallback
                 }
             } else {
-                std::cerr << "nextFundingRate field not found" << std::endl;
+                // If no predicted rate is available, use the current rate
                 funding.predicted_rate = funding.rate;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
             
-            // Set default values on error
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching funding rate from OKX: " << e.what() << std::endl;
+            
+            // Set default values for funding rate
             funding.rate = 0.0;
-            funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-            funding.payment_interval = std::chrono::hours(8);
             funding.predicted_rate = 0.0;
+            funding.payment_interval = std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
         }
         
         return funding;
