@@ -193,4 +193,47 @@ int WebSocketClient::callback_function(struct lws *wsi, enum lws_callback_reason
     return 0;
 }
 
+void WebSocketClient::subscribeToStreams(const std::vector<std::string>& streams) {
+    if (!isConnected()) {
+        std::cerr << "Cannot subscribe to streams: WebSocket not connected" << std::endl;
+        return;
+    }
+    
+    // Add new streams to the existing streams list
+    for (const auto& stream : streams) {
+        if (std::find(streams_.begin(), streams_.end(), stream) == streams_.end()) {
+            streams_.push_back(stream);
+        }
+    }
+    
+    // Create subscription message in JSON format
+    json subscription;
+    subscription["method"] = "SUBSCRIBE";
+    subscription["params"] = streams;
+    subscription["id"] = static_cast<int>(time(nullptr)); // Use current timestamp as ID
+    
+    std::string message = subscription.dump();
+    
+    // Send the subscription message
+    int len = message.length();
+    unsigned char* buf = static_cast<unsigned char*>(malloc(LWS_PRE + len));
+    if (!buf) {
+        std::cerr << "Out of memory for subscription message" << std::endl;
+        return;
+    }
+    
+    memcpy(buf + LWS_PRE, message.c_str(), len);
+    
+    // Queue the message for sending
+    int result = lws_write(wsi, buf + LWS_PRE, len, LWS_WRITE_TEXT);
+    free(buf);
+    
+    if (result < 0) {
+        std::cerr << "Error sending subscription message" << std::endl;
+        return;
+    }
+    
+    std::cout << "Subscribed to " << streams.size() << " additional streams" << std::endl;
+}
+
 } // namespace funding 

@@ -1,5 +1,5 @@
 #include <exchange/exchange_interface.h>
-#include <exchange/exchange_config.h>
+#include <config/config_manager.h>
 #include <exchange/types.h>
 #include <iostream>
 #include <map>
@@ -37,21 +37,26 @@ public:
         std::chrono::system_clock::time_point timestamp;
     };
 
-    BinanceExchange(const ExchangeConfig& config) : 
-        api_key_(config.getApiKey()),
-        api_secret_(config.getApiSecret()),
-        base_url_("https://api.binance.com"),
-        use_testnet_(false), // Always use production API
-        last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
+    BinanceExchange(const ExchangeConfig& config) 
+        : api_key_(config.api_key), 
+          api_secret_(config.api_secret),
+          base_url_(config.base_url.empty() ? "https://api.binance.com" : config.base_url),
+          connect_timeout_ms_(config.connect_timeout_ms > 0 ? config.connect_timeout_ms : 5000),
+          request_timeout_ms_(config.request_timeout_ms > 0 ? config.request_timeout_ms : 10000),
+          use_testnet_(config.use_testnet),
+          last_fee_update_(std::chrono::system_clock::now() - std::chrono::hours(25)) { // Force initial fee update
         
-        // Always use production URL
-        base_url_ = "https://api.binance.com";
+        // Initialize CURL globally if not already done
+        static bool curl_initialized = false;
+        if (!curl_initialized) {
+            curl_global_init(CURL_GLOBAL_ALL);
+            curl_initialized = true;
+        }
         
-        // Initialize CURL
-        curl_global_init(CURL_GLOBAL_ALL);
+        // Initialize price cache
+        price_cache_.clear();
         
-        // Connect and fetch initial fee structure
-        reconnect();
+        // Initialize fee structure
         updateFeeStructure();
     }
     
@@ -71,116 +76,192 @@ public:
     // Market data implementations
     std::vector<Instrument> getAvailableInstruments(MarketType type) override {
         std::vector<Instrument> instruments;
-        std::string endpoint;
         
         try {
-            switch (type) {
-                case MarketType::SPOT:
-                    endpoint = "/api/v3/exchangeInfo";
-                    break;
-                case MarketType::PERPETUAL:
-                    endpoint = "/fapi/v1/exchangeInfo";
-                    break;
-                case MarketType::MARGIN:
-                    endpoint = "/sapi/v1/margin/isolated/allPairs";
-                    break;
-                default:
-                    throw std::runtime_error("Unsupported market type");
+            std::string endpoint;
+            json response;
+            
+            if (type == MarketType::SPOT) {
+                endpoint = "/api/v3/exchangeInfo";
+                std::cout << "Fetching Binance spot instruments from endpoint: " << endpoint << std::endl;
+                response = makeApiCall(endpoint);
+            } else if (type == MarketType::PERPETUAL) {
+                // Use the futures API for perpetual contracts
+                std::string original_base_url = base_url_;
+                base_url_ = "https://fapi.binance.com";
+                
+                endpoint = "/fapi/v1/exchangeInfo";
+                std::cout << "Fetching Binance perpetual instruments from endpoint: " << endpoint << std::endl;
+                try {
+                    response = makeApiCall(endpoint);
+                } catch (const std::exception& e) {
+                    // Restore original base URL before re-throwing
+                    base_url_ = original_base_url;
+                    std::cerr << "Error fetching Binance instruments: " << e.what() << std::endl;
+                    return instruments;
+                }
+                
+                // Restore original base URL
+                base_url_ = original_base_url;
+            } else {
+                std::cerr << "Unsupported market type for Binance: " << static_cast<int>(type) << std::endl;
+                return instruments;
             }
             
-            json response = makeApiCall(endpoint, "", false);
-            
-            // Check if response is empty
-            if (response.empty()) {
-                std::cerr << "Empty response when fetching instruments for market type: " 
-                         << static_cast<int>(type) << std::endl;
+            // Check if response is empty or null
+            if (response.empty() || response.is_null()) {
+                std::cerr << "Empty or null response received from Binance API" << std::endl;
                 return instruments;
             }
             
             if (type == MarketType::SPOT || type == MarketType::PERPETUAL) {
                 // Check if the response contains the symbols field
-                if (!response.contains("symbols") || !response["symbols"].is_array()) {
-                    std::cerr << "Invalid response format: missing or invalid 'symbols' field" << std::endl;
+                if (!response.contains("symbols")) {
+                    std::cerr << "Invalid response format: missing 'symbols' field" << std::endl;
+                    if (!response.empty()) {
+                        std::cerr << "Response: " << response.dump().substr(0, 1000) << "..." << std::endl;
+                    }
                     return instruments;
                 }
+                
+                if (!response["symbols"].is_array()) {
+                    std::cerr << "Invalid response format: 'symbols' is not an array" << std::endl;
+                    if (!response.empty()) {
+                        std::cerr << "Response: " << response.dump().substr(0, 1000) << "..." << std::endl;
+                    }
+                    return instruments;
+                }
+                
+                std::cout << "Processing " << response["symbols"].size() << " symbols from Binance" << std::endl;
                 
                 for (const auto& symbol : response["symbols"]) {
                     try {
                         // Skip symbols that are not trading
-                        if (!symbol.contains("status") || symbol["status"] != "TRADING") {
+                        if (!symbol.contains("status")) {
+                            std::cerr << "Symbol missing 'status' field, skipping" << std::endl;
+                            continue;
+                        }
+                        
+                        if (symbol["status"] != "TRADING") {
+                            // Skip non-trading symbols
+                            continue;
+                        }
+                        
+                        if (!symbol.contains("symbol")) {
+                            std::cerr << "Symbol missing 'symbol' field, skipping" << std::endl;
                             continue;
                         }
                         
                         Instrument instrument;
                         instrument.symbol = symbol["symbol"].get<std::string>();
-                        instrument.base_currency = symbol["baseAsset"].get<std::string>();
-                        instrument.quote_currency = symbol["quoteAsset"].get<std::string>();
+                        
+                        // Handle different field names between spot and futures
+                        if (type == MarketType::SPOT) {
+                            if (!symbol.contains("baseAsset")) {
+                                std::cerr << "Symbol " << instrument.symbol << " missing 'baseAsset' field, skipping" << std::endl;
+                                continue;
+                            }
+                            
+                            if (!symbol.contains("quoteAsset")) {
+                                std::cerr << "Symbol " << instrument.symbol << " missing 'quoteAsset' field, skipping" << std::endl;
+                                continue;
+                            }
+                            
+                            instrument.base_currency = symbol["baseAsset"].get<std::string>();
+                            instrument.quote_currency = symbol["quoteAsset"].get<std::string>();
+                        } else {
+                            // For futures, extract base and quote from the symbol (e.g., BTCUSDT)
+                            std::string sym = symbol["symbol"].get<std::string>();
+                            
+                            // Check if the symbol contains "USDT"
+                            size_t pos = sym.find("USDT");
+                            if (pos != std::string::npos && pos > 0) {
+                                instrument.base_currency = sym.substr(0, pos);
+                                instrument.quote_currency = "USDT";
+                            } else {
+                                // Try other quote currencies
+                                pos = sym.find("BUSD");
+                                if (pos != std::string::npos && pos > 0) {
+                                    instrument.base_currency = sym.substr(0, pos);
+                                    instrument.quote_currency = "BUSD";
+                                } else {
+                                    pos = sym.find("USDC");
+                                    if (pos != std::string::npos && pos > 0) {
+                                        instrument.base_currency = sym.substr(0, pos);
+                                        instrument.quote_currency = "USDC";
+                                    } else {
+                                        // Default fallback - use the symbol as is
+                                        instrument.base_currency = sym;
+                                        instrument.quote_currency = "UNKNOWN";
+                                        std::cerr << "Could not determine base/quote for futures symbol: " << sym << std::endl;
+                                    }
+                                }
+                            }
+                            
+                            // Log the extracted base and quote currencies
+                            std::cout << "Futures symbol: " << sym 
+                                      << ", Base: " << instrument.base_currency 
+                                      << ", Quote: " << instrument.quote_currency << std::endl;
+                        }
+                        
                         instrument.market_type = type;
+                        
+                        // Set default values in case filters are missing
+                        instrument.min_qty = 0.00001;
+                        instrument.max_qty = 9999999.0;
+                        instrument.tick_size = 0.00000001;
+                        instrument.price_precision = 8;
+                        instrument.qty_precision = 8;
                         
                         // Extract filters for min/max quantity and price precision
                         if (symbol.contains("filters") && symbol["filters"].is_array()) {
                             for (const auto& filter : symbol["filters"]) {
-                                if (filter.contains("filterType")) {
-                                    if (filter["filterType"] == "LOT_SIZE") {
-                                        instrument.min_qty = std::stod(filter["minQty"].get<std::string>());
-                                        instrument.max_qty = std::stod(filter["maxQty"].get<std::string>());
-                                    } else if (filter["filterType"] == "PRICE_FILTER") {
-                                        instrument.tick_size = std::stod(filter["tickSize"].get<std::string>());
+                                try {
+                                    if (!filter.contains("filterType")) {
+                                        continue;
                                     }
+                                    
+                                    if (filter["filterType"] == "LOT_SIZE") {
+                                        if (filter.contains("minQty") && filter["minQty"].is_string()) {
+                                            instrument.min_qty = std::stod(filter["minQty"].get<std::string>());
+                                        }
+                                        
+                                        if (filter.contains("maxQty") && filter["maxQty"].is_string()) {
+                                            instrument.max_qty = std::stod(filter["maxQty"].get<std::string>());
+                                        }
+                                    } else if (filter["filterType"] == "PRICE_FILTER") {
+                                        if (filter.contains("tickSize") && filter["tickSize"].is_string()) {
+                                            instrument.tick_size = std::stod(filter["tickSize"].get<std::string>());
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    std::cerr << "Error processing filter for " << instrument.symbol << ": " << e.what() << std::endl;
+                                    // Continue with next filter
                                 }
                             }
                         }
                         
                         // Set precision values
-                        if (symbol.contains("quotePrecision")) {
-                            instrument.price_precision = symbol["quotePrecision"].get<int>();
-                        } else {
-                            instrument.price_precision = 8; // Default
-                        }
-                        
-                        if (symbol.contains("baseAssetPrecision")) {
-                            instrument.qty_precision = symbol["baseAssetPrecision"].get<int>();
-                        } else {
-                            instrument.qty_precision = 8; // Default
+                        try {
+                            if (symbol.contains("quotePrecision")) {
+                                instrument.price_precision = symbol["quotePrecision"].get<int>();
+                            }
+                            
+                            if (symbol.contains("baseAssetPrecision")) {
+                                instrument.qty_precision = symbol["baseAssetPrecision"].get<int>();
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error setting precision for " << instrument.symbol << ": " << e.what() << std::endl;
+                            // Use default values set earlier
                         }
                         
                         instruments.push_back(instrument);
+                    } catch (const json::type_error& e) {
+                        std::cerr << "JSON type error parsing instrument: " << e.what() << std::endl;
+                        // Continue with next instrument
                     } catch (const std::exception& e) {
                         std::cerr << "Error parsing instrument: " << e.what() << std::endl;
                         // Continue with next instrument
-                    }
-                }
-            } else if (type == MarketType::MARGIN) {
-                // Check if the response is an array
-                if (!response.is_array()) {
-                    std::cerr << "Invalid response format for margin pairs: not an array" << std::endl;
-                    return instruments;
-                }
-                
-                for (const auto& pair : response) {
-                    try {
-                        // Skip pairs that are not normal
-                        if (!pair.contains("status") || pair["status"] != "NORMAL") {
-                            continue;
-                        }
-                        
-                        Instrument instrument;
-                        instrument.symbol = pair["symbol"].get<std::string>();
-                        instrument.base_currency = pair["base"].get<std::string>();
-                        instrument.quote_currency = pair["quote"].get<std::string>();
-                        instrument.market_type = type;
-                        
-                        // Set default values for fields that require additional API calls
-                        instrument.min_qty = 0.0;
-                        instrument.max_qty = 0.0;
-                        instrument.tick_size = 0.0;
-                        instrument.price_precision = 8; // Default
-                        instrument.qty_precision = 8; // Default
-                        
-                        instruments.push_back(instrument);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error parsing margin pair: " << e.what() << std::endl;
-                        // Continue with next pair
                     }
                 }
             }
@@ -188,20 +269,21 @@ public:
             std::cout << "Found " << instruments.size() << " instruments for market type " 
                      << static_cast<int>(type) << " on Binance" << std::endl;
             
+            return instruments;
+        } catch (const json::type_error& e) {
+            std::cerr << "JSON type error fetching Binance instruments: " << e.what() << std::endl;
+            return instruments;
         } catch (const std::exception& e) {
             std::cerr << "Error fetching Binance instruments: " << e.what() << std::endl;
+            return instruments;
+        } catch (...) {
+            std::cerr << "Unknown error fetching Binance instruments" << std::endl;
+            return instruments;
         }
-        
-        return instruments;
     }
     
     double getPrice(const std::string& symbol) override {
         try {
-            // Validate symbol format
-            if (symbol.empty()) {
-                throw std::runtime_error("Empty symbol provided");
-            }
-            
             // Convert symbol to uppercase for consistency
             std::string upper_symbol = symbol;
             std::transform(upper_symbol.begin(), upper_symbol.end(), upper_symbol.begin(), ::toupper);
@@ -217,17 +299,67 @@ public:
             }
             
             // Determine if this is a futures symbol
+            // First check if it contains "PERP" in the name
             bool is_futures = upper_symbol.find("PERP") != std::string::npos;
-            std::string endpoint = is_futures ? "/fapi/v1/ticker/price" : "/api/v3/ticker/price";
             
-            // Add symbol parameter
+            // If not, check if it ends with common futures suffixes
+            if (!is_futures) {
+                is_futures = upper_symbol.find("USDT") != std::string::npos ||
+                             upper_symbol.find("BUSD") != std::string::npos ||
+                             upper_symbol.find("USDC") != std::string::npos;
+            }
+            
+            std::cout << "Symbol: " << upper_symbol << ", is_futures: " << (is_futures ? "true" : "false") << std::endl;
+            
+            // Save original base URL if using futures API
+            std::string original_base_url;
+            if (is_futures) {
+                original_base_url = base_url_;
+                base_url_ = "https://fapi.binance.com";
+            }
+            
+            // Set endpoint and parameters
+            std::string endpoint = is_futures ? "/fapi/v1/ticker/price" : "/api/v3/ticker/price";
             std::string params = "symbol=" + upper_symbol;
             
             // Make API call
-            json response = makeApiCall(endpoint, params);
+            json response;
+            try {
+                response = makeApiCall(endpoint, params, false, "GET", is_futures);
+            } catch (const std::exception& e) {
+                // Restore original base URL if needed
+                if (is_futures) {
+                    base_url_ = original_base_url;
+                }
+                
+                // If we failed with futures API, try with spot API
+                if (is_futures) {
+                    std::cout << "Failed to get price with futures API, trying spot API for " << upper_symbol << std::endl;
+                    is_futures = false;
+                    endpoint = "/api/v3/ticker/price";
+                    try {
+                        response = makeApiCall(endpoint, params, false, "GET", false);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching price for " << symbol << " with spot API: " << e.what() << std::endl;
+                        throw std::runtime_error("Failed to get price for " + symbol + " with both futures and spot APIs");
+                    }
+                } else {
+                    throw;
+                }
+            }
             
+            // Restore original base URL if needed
+            if (is_futures) {
+                base_url_ = original_base_url;
+            }
+            
+            // Check if the response contains the price field
             if (!response.contains("price")) {
-                throw std::runtime_error("Price not found in response");
+                std::cerr << "Price not found in response for symbol: " << symbol << std::endl;
+                if (!response.empty()) {
+                    std::cerr << "Response: " << response.dump() << std::endl;
+                }
+                throw std::runtime_error("Price not found in response for symbol: " + symbol);
             }
             
             // Handle both string and number types for price
@@ -253,8 +385,45 @@ public:
         book.symbol = symbol;
         
         try {
-            std::string endpoint = "/api/v3/depth?symbol=" + symbol + "&limit=" + std::to_string(depth);
-            json response = makeApiCall(endpoint, "", false);
+            // Convert symbol to uppercase for consistency
+            std::string upper_symbol = symbol;
+            std::transform(upper_symbol.begin(), upper_symbol.end(), upper_symbol.begin(), ::toupper);
+            
+            // Determine if this is a futures symbol
+            bool is_futures = upper_symbol.find("PERP") != std::string::npos;
+            
+            // Save original base URL if using futures API
+            std::string original_base_url;
+            if (is_futures) {
+                original_base_url = base_url_;
+                base_url_ = "https://fapi.binance.com";
+            }
+            
+            // Set endpoint based on market type
+            std::string endpoint;
+            if (is_futures) {
+                endpoint = "/fapi/v1/depth?symbol=" + upper_symbol + "&limit=" + std::to_string(depth);
+            } else {
+                endpoint = "/api/v3/depth?symbol=" + upper_symbol + "&limit=" + std::to_string(depth);
+            }
+            
+            // Make API call
+            json response;
+            try {
+                response = makeApiCall(endpoint, "", false, "GET", is_futures);
+            } catch (const std::exception& e) {
+                // Restore original base URL if needed
+                if (is_futures) {
+                    base_url_ = original_base_url;
+                }
+                std::cerr << "Error fetching order book for " << symbol << ": " << e.what() << std::endl;
+                return book;
+            }
+            
+            // Restore original base URL if needed
+            if (is_futures) {
+                base_url_ = original_base_url;
+            }
             
             // Check if response is empty or doesn't contain required fields
             if (response.empty()) {
@@ -272,6 +441,8 @@ public:
                         book.bids.push_back(level);
                     }
                 }
+            } else {
+                std::cerr << "Missing or invalid 'bids' field in order book response for " << symbol << std::endl;
             }
             
             // Process asks
@@ -284,6 +455,8 @@ public:
                         book.asks.push_back(level);
                     }
                 }
+            } else {
+                std::cerr << "Missing or invalid 'asks' field in order book response for " << symbol << std::endl;
             }
             
             // Set timestamp
@@ -301,43 +474,169 @@ public:
         funding.symbol = symbol;
         
         try {
+            std::cout << "Getting funding rate for " << symbol << " on Binance" << std::endl;
+            
             // Binance futures API is on a different base URL
             std::string original_base_url = base_url_;
             base_url_ = "https://fapi.binance.com";
             
             std::string endpoint = "/fapi/v1/premiumIndex?symbol=" + symbol;
-            json response = makeApiCall(endpoint);
+            json response;
+            
+            try {
+                // Use the futures_api parameter to indicate this is a futures API call
+                std::cout << "Making API call to " << endpoint << std::endl;
+                response = makeApiCall(endpoint, "", false, "GET", true);
+                std::cout << "API call successful" << std::endl;
+            } catch (const std::exception& e) {
+                // Restore original base URL before re-throwing
+                base_url_ = original_base_url;
+                std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
+                
+                // Set default values on error
+                funding.rate = 0.0;
+                funding.next_payment = calculateNextFundingTime();
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
             
             // Restore original base URL
             base_url_ = original_base_url;
             
-            if (response.contains("lastFundingRate")) {
-                funding.rate = std::stod(response["lastFundingRate"].get<std::string>());
+            // Check if the response is empty or null
+            if (response.empty() || response.is_null()) {
+                std::cerr << "Empty or null response when fetching funding rate for " << symbol << std::endl;
                 
-                // Get next funding time
-                if (response.contains("nextFundingTime")) {
-                    int64_t next_funding_ms = response["nextFundingTime"].get<int64_t>();
-                    funding.next_payment = std::chrono::system_clock::time_point(
-                        std::chrono::milliseconds(next_funding_ms));
-                } else {
-                    // Default to 8 hours from now if not provided
-                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                }
-                
-                // Binance has 8-hour funding intervals
+                // Set default values
+                funding.rate = 0.0;
+                funding.next_payment = calculateNextFundingTime();
                 funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Check if the response is an error message
+            if (response.is_object() && response.contains("code") && response.contains("msg")) {
+                std::cerr << "API error when fetching funding rate for " << symbol 
+                          << ": Code " << response["code"].get<int>() 
+                          << ", Message: " << response["msg"].get<std::string>() << std::endl;
                 
-                // Use current rate as predicted rate if not provided
-                funding.predicted_rate = funding.rate;
-            } else {
-                throw std::runtime_error("Funding rate data not found for symbol: " + symbol);
+                // Set default values
+                funding.rate = 0.0;
+                funding.next_payment = calculateNextFundingTime();
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Dump the response for debugging (truncated for large responses)
+            std::cout << "Response for " << symbol << ": " 
+                      << (response.dump().length() > 1000 ? response.dump().substr(0, 1000) + "..." : response.dump()) 
+                      << std::endl;
+            
+            try {
+                // Check if the response contains the lastFundingRate field
+                if (response.contains("lastFundingRate")) {
+                    std::cout << "Found lastFundingRate field" << std::endl;
+                    
+                    // Check if lastFundingRate is a string
+                    if (response["lastFundingRate"].is_string()) {
+                        funding.rate = std::stod(response["lastFundingRate"].get<std::string>());
+                    } else if (response["lastFundingRate"].is_number()) {
+                        funding.rate = response["lastFundingRate"].get<double>();
+                    } else {
+                        std::cerr << "lastFundingRate is neither a string nor a number" << std::endl;
+                        funding.rate = 0.0;
+                    }
+                    
+                    std::cout << "Funding rate: " << funding.rate << std::endl;
+                    
+                    // Get next funding time
+                    if (response.contains("nextFundingTime")) {
+                        try {
+                            int64_t next_funding_time = 0;
+                            
+                            if (response["nextFundingTime"].is_string()) {
+                                next_funding_time = std::stoll(response["nextFundingTime"].get<std::string>());
+                            } else if (response["nextFundingTime"].is_number()) {
+                                next_funding_time = response["nextFundingTime"].get<int64_t>();
+                            } else {
+                                std::cerr << "nextFundingTime is neither a string nor a number" << std::endl;
+                                next_funding_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count() + 8 * 60 * 60 * 1000;
+                            }
+                            
+                            // Convert milliseconds to time_point
+                            funding.next_payment = std::chrono::system_clock::from_time_t(next_funding_time / 1000);
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error parsing nextFundingTime: " << e.what() << std::endl;
+                            funding.next_payment = calculateNextFundingTime();
+                        }
+                    } else {
+                        // Calculate next funding time based on Binance's schedule
+                        std::cerr << "nextFundingTime field not found" << std::endl;
+                        funding.next_payment = calculateNextFundingTime();
+                    }
+                    
+                    // Binance has 8-hour funding intervals
+                    funding.payment_interval = std::chrono::hours(8);
+                    
+                    // Try to get predicted rate if available
+                    if (response.contains("predictedFundingRate")) {
+                        try {
+                            if (response["predictedFundingRate"].is_string()) {
+                                funding.predicted_rate = std::stod(response["predictedFundingRate"].get<std::string>());
+                            } else if (response["predictedFundingRate"].is_number()) {
+                                funding.predicted_rate = response["predictedFundingRate"].get<double>();
+                            } else {
+                                std::cerr << "predictedFundingRate is neither a string nor a number" << std::endl;
+                                funding.predicted_rate = funding.rate; // Use current rate as fallback
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error parsing predictedFundingRate: " << e.what() << std::endl;
+                            funding.predicted_rate = funding.rate; // Use current rate as fallback
+                        }
+                    } else {
+                        // Use current rate as predicted rate if not provided
+                        funding.predicted_rate = funding.rate;
+                    }
+                } else {
+                    // Log the error and provide default values
+                    std::cerr << "Warning: Funding rate data not found for symbol: " << symbol << std::endl;
+                    if (!response.empty()) {
+                        std::cerr << "Response: " << response.dump() << std::endl;
+                    }
+                    
+                    // Set default values
+                    funding.rate = 0.0;
+                    funding.next_payment = calculateNextFundingTime();
+                    funding.payment_interval = std::chrono::hours(8);
+                    funding.predicted_rate = 0.0;
+                }
+            } catch (const json::type_error& e) {
+                std::cerr << "JSON type error when parsing funding rate for " << symbol << ": " << e.what() << std::endl;
+                
+                // Set default values
+                funding.rate = 0.0;
+                funding.next_payment = calculateNextFundingTime();
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+            } catch (const std::exception& e) {
+                std::cerr << "Error parsing funding rate for " << symbol << ": " << e.what() << std::endl;
+                
+                // Set default values
+                funding.rate = 0.0;
+                funding.next_payment = calculateNextFundingTime();
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
             }
         } catch (const std::exception& e) {
-            std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
+            std::cerr << "Error in getFundingRate for " << symbol << ": " << e.what() << std::endl;
             
-            // Set default values on error
+            // Set default values
             funding.rate = 0.0;
-            funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
             funding.payment_interval = std::chrono::hours(8);
             funding.predicted_rate = 0.0;
         }
@@ -712,6 +1011,8 @@ private:
     std::string api_key_;
     std::string api_secret_;
     std::string base_url_;
+    int connect_timeout_ms_;
+    int request_timeout_ms_;
     bool use_testnet_;
     FeeStructure fee_structure_;
     std::map<std::string, std::pair<double, double>> symbol_fees_; // symbol -> (maker, taker)
@@ -739,36 +1040,30 @@ private:
     }
     
     // Make API call to Binance
-    json makeApiCall(const std::string& endpoint, std::string params = "", bool is_private = false, const std::string& method = "GET") {
+    json makeApiCall(const std::string& endpoint, std::string params = "", bool auth = false, 
+                    const std::string& method = "GET", bool futures_api = false) {
+        std::cout << "Making API call to " << (futures_api ? "https://fapi.binance.com" : base_url_) 
+                  << endpoint << " with params: " << params << std::endl;
+        
         CURL* curl = curl_easy_init();
         if (!curl) {
-            throw std::runtime_error("Failed to initialize CURL");
+            std::cerr << "Failed to initialize CURL" << std::endl;
+            return json::object(); // Return empty JSON object
         }
-
-        std::string response_string;
+        
         std::string url;
         
         // Check if this is a futures API call
-        if (endpoint.find("/fapi/") == 0) {
+        if (futures_api) {
             // Use the futures API URL
             url = "https://fapi.binance.com" + endpoint;
         } else {
-            // Use the regular API URL
+            // Use the configured base URL
             url = base_url_ + endpoint;
         }
         
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);  // Disable SSL verification
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);  // Disable hostname verification
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);        // 30 second timeout
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L); // 10 second connect timeout
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Follow redirects
-        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);       // Maximum number of redirects
-        
         // For private API calls, add timestamp and signature
-        if (is_private) {
+        if (auth) {
             // Add timestamp if not already present
             if (params.find("timestamp=") == std::string::npos) {
                 std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -781,71 +1076,145 @@ private:
                 }
             }
             
-            // Generate and add signature
-            std::string signature = generateSignature(params);
+            // Generate HMAC-SHA256 signature
+            unsigned char* digest = HMAC(EVP_sha256(), api_secret_.c_str(), api_secret_.length(),
+                                        (unsigned char*)params.c_str(), params.length(), NULL, NULL);
             
-            // URL encode the signature
-            char* escaped_signature = curl_easy_escape(curl, signature.c_str(), signature.length());
-            if (escaped_signature) {
-                params += "&signature=";
-                params += escaped_signature;
-                curl_free(escaped_signature);
-            } else {
-                params += "&signature=" + signature;
+            // Convert to hex string
+            char signature[65];
+            for (int i = 0; i < 32; i++) {
+                sprintf(&signature[i*2], "%02x", digest[i]);
             }
+            signature[64] = 0;
+            
+            // Add signature to params
+            params += "&signature=" + std::string(signature);
         }
         
-        // Add query parameters to URL
-        if (!params.empty()) {
-            std::string full_url = url + "?" + params;
-            curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-            
-            // Debug output
-            std::cout << "DEBUG - Request URL: " << full_url << std::endl;
+        // Append parameters to URL for GET requests
+        if (method == "GET" && !params.empty()) {
+            url += "?" + params;
         }
+        
+        std::cout << "Final URL: " << url << std::endl;
+        
+        // Set up CURL request
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        
+        // Response string to store result
+        std::string response_string;
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+        
+        // Set timeouts
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms_);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, request_timeout_ms_);
         
         // Add API key header for authenticated requests
         struct curl_slist* headers = NULL;
-        if (is_private) {
+        if (auth) {
             headers = curl_slist_append(headers, ("X-MBX-APIKEY: " + api_key_).c_str());
             
-            // Debug output
-            std::cout << "DEBUG - Using API Key: " << api_key_ << std::endl;
+            // Add content-type header for POST requests
+            if (method == "POST") {
+                headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+            }
+            
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         }
         
-        // Add content-type header
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        // Set request method
+        if (method == "POST") {
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            if (!params.empty()) {
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, params.c_str());
+            }
+        } else if (method == "DELETE") {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+        }
         
         // Perform the request
         CURLcode res = curl_easy_perform(curl);
         
+        // Check for errors
+        if (res != CURLE_OK) {
+            std::string error_msg = "CURL request failed: " + std::string(curl_easy_strerror(res));
+            std::cerr << error_msg << std::endl;
+            
+            // Clean up
+            if (headers) {
+                curl_slist_free_all(headers);
+            }
+            curl_easy_cleanup(curl);
+            
+            // Return empty JSON object instead of throwing
+            return json::object();
+        }
+        
+        // Get HTTP response code
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        
         // Clean up
-        curl_slist_free_all(headers);
+        if (headers) {
+            curl_slist_free_all(headers);
+        }
         curl_easy_cleanup(curl);
         
-        if (res != CURLE_OK) {
-            throw std::runtime_error("CURL request failed: " + std::string(curl_easy_strerror(res)));
+        // Check for empty response
+        if (response_string.empty()) {
+            std::cerr << "Empty response from API" << std::endl;
+            return json::object(); // Return empty JSON object
         }
         
-        // Parse and return JSON response
+        // Print response (truncated for large responses)
+        std::cout << "Response: " << (response_string.length() > 1000 ? response_string.substr(0, 1000) + "..." : response_string) << std::endl;
+        
+        // Parse JSON response with enhanced error handling
+        json response_json = json::object(); // Default to empty object
         try {
-            json response = json::parse(response_string);
-            
-            // Check for error response
-            if (response.contains("code") && response.contains("msg")) {
-                // Only treat it as an error if both code and msg are present (Binance error format)
-                if (response["code"] != 0 && response["code"] != 200) {
-                    std::string error_msg = response["msg"].get<std::string>();
-                    throw std::runtime_error("API error: " + error_msg);
-                }
+            // Check if the response is valid JSON before parsing
+            if (response_string[0] != '{' && response_string[0] != '[') {
+                std::cerr << "Response is not valid JSON: " << response_string.substr(0, 100) << std::endl;
+                return json::object(); // Return empty JSON object
             }
             
-            return response;
+            // Parse the JSON response
+            response_json = json::parse(response_string);
+            
+            // Check for API error response
+            if (response_json.is_object()) {
+                if (response_json.contains("code") && response_json.contains("msg")) {
+                    // This is likely an error response
+                    std::cerr << "API error: Code " << response_json["code"].get<int>() 
+                              << ", Message: " << response_json["msg"].get<std::string>() << std::endl;
+                }
+            }
+        } catch (const json::parse_error& e) {
+            std::cerr << "JSON parsing error: " << e.what() << std::endl;
+            std::cerr << "Response string: " << response_string.substr(0, 1000) << (response_string.length() > 1000 ? "..." : "") << std::endl;
+            // Return empty JSON object instead of throwing
+            return json::object();
+        } catch (const json::type_error& e) {
+            std::cerr << "JSON type error: " << e.what() << std::endl;
+            std::cerr << "Response string: " << response_string.substr(0, 1000) << (response_string.length() > 1000 ? "..." : "") << std::endl;
+            // Return empty JSON object instead of throwing
+            return json::object();
         } catch (const std::exception& e) {
-            throw std::runtime_error("Failed to parse JSON response: " + std::string(e.what()) + 
-                                   ", Response: " + response_string);
+            std::cerr << "Error processing response: " << e.what() << std::endl;
+            std::cerr << "Response string: " << response_string.substr(0, 1000) << (response_string.length() > 1000 ? "..." : "") << std::endl;
+            // Return empty JSON object instead of throwing
+            return json::object();
         }
+        
+        // Check HTTP status code
+        if (http_code >= 400) {
+            std::cerr << "HTTP request failed with code " << http_code << ": " << response_string << std::endl;
+            // Return the error response JSON instead of throwing
+            return response_json;
+        }
+        
+        return response_json;
     }
     
     // Update the fee structure from the exchange
@@ -969,6 +1338,50 @@ private:
             fee_structure_.margin_maker_fee = 0.0015;
             fee_structure_.margin_taker_fee = 0.0020;
         }
+    }
+
+    std::chrono::system_clock::time_point calculateNextFundingTime() {
+        // Binance funding times occur at 00:00, 08:00, and 16:00 UTC
+        auto now = std::chrono::system_clock::now();
+        
+        // Convert to time_t for easier date/time manipulation
+        std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm* now_tm = std::gmtime(&now_time_t);
+        
+        // Get current hour in UTC
+        int current_hour = now_tm->tm_hour;
+        
+        // Calculate hours until next funding time
+        int hours_until_next;
+        
+        if (current_hour < 8) {
+            // Next funding is at 08:00 UTC
+            hours_until_next = 8 - current_hour;
+        } else if (current_hour < 16) {
+            // Next funding is at 16:00 UTC
+            hours_until_next = 16 - current_hour;
+        } else {
+            // Next funding is at 00:00 UTC tomorrow
+            hours_until_next = 24 - current_hour;
+        }
+        
+        // Reset minutes, seconds, and microseconds for exact hour
+        now_tm->tm_min = 0;
+        now_tm->tm_sec = 0;
+        
+        // Add hours until next funding time
+        now_tm->tm_hour += hours_until_next;
+        
+        // Convert back to time_t
+        std::time_t next_funding_time_t = std::mktime(now_tm);
+        
+        // Convert to UTC (mktime assumes local time)
+        // For simplicity, we'll adjust based on the difference between local and UTC
+        std::time_t utc_offset = std::mktime(std::gmtime(&now_time_t)) - now_time_t;
+        next_funding_time_t -= utc_offset;
+        
+        // Convert back to system_clock::time_point
+        return std::chrono::system_clock::from_time_t(next_funding_time_t);
     }
 };
 

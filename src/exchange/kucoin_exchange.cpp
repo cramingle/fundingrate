@@ -102,6 +102,9 @@ private:
     
     // Update the fee structure from the exchange
     void updateFeeStructure();
+    
+    // Calculate the next funding time based on KuCoin's funding schedule (00:00, 08:00, 16:00 UTC)
+    std::chrono::system_clock::time_point calculateNextFundingTime();
 };
 
 // Constructor
@@ -737,11 +740,11 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
                 // Set the last funding time
                 auto last_funding_time = std::chrono::system_clock::from_time_t(funding_time_ms / 1000);
                 
-                // Next funding time is typically 8 hours after the last one
-                rate.next_payment = last_funding_time + std::chrono::hours(8);
+                // Calculate next funding time based on KuCoin's schedule
+                rate.next_payment = calculateNextFundingTime();
             } else {
-                // Default to 8 hours from now if timePoint is not available
-                rate.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+                // Calculate next funding time based on KuCoin's schedule
+                rate.next_payment = calculateNextFundingTime();
             }
             
             // KuCoin typically has 8-hour funding intervals
@@ -767,10 +770,55 @@ FundingRate KuCoinExchange::getFundingRate(const std::string& symbol) {
         rate.rate = 0.0;
         rate.predicted_rate = 0.0;
         rate.payment_interval = std::chrono::hours(8);
-        rate.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+        rate.next_payment = calculateNextFundingTime();
     }
     
     return rate;
+}
+
+// Calculate the next funding time based on KuCoin's funding schedule (00:00, 08:00, 16:00 UTC)
+std::chrono::system_clock::time_point KuCoinExchange::calculateNextFundingTime() {
+    // KuCoin funding times occur at 00:00, 08:00, and 16:00 UTC
+    auto now = std::chrono::system_clock::now();
+    
+    // Convert to time_t for easier date/time manipulation
+    std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::gmtime(&now_time_t);
+    
+    // Get current hour in UTC
+    int current_hour = now_tm->tm_hour;
+    
+    // Calculate hours until next funding time
+    int hours_until_next;
+    
+    if (current_hour < 8) {
+        // Next funding is at 08:00 UTC
+        hours_until_next = 8 - current_hour;
+    } else if (current_hour < 16) {
+        // Next funding is at 16:00 UTC
+        hours_until_next = 16 - current_hour;
+    } else {
+        // Next funding is at 00:00 UTC tomorrow
+        hours_until_next = 24 - current_hour;
+    }
+    
+    // Reset minutes, seconds, and microseconds for exact hour
+    now_tm->tm_min = 0;
+    now_tm->tm_sec = 0;
+    
+    // Add hours until next funding time
+    now_tm->tm_hour += hours_until_next;
+    
+    // Convert back to time_t
+    std::time_t next_funding_time_t = std::mktime(now_tm);
+    
+    // Convert to UTC (mktime assumes local time)
+    // For simplicity, we'll adjust based on the difference between local and UTC
+    std::time_t utc_offset = std::mktime(std::gmtime(&now_time_t)) - now_time_t;
+    next_funding_time_t -= utc_offset;
+    
+    // Convert back to system_clock::time_point
+    return std::chrono::system_clock::from_time_t(next_funding_time_t);
 }
 
 // Fee information

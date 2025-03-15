@@ -1,6 +1,7 @@
 #include <strategy/arbitrage_strategy.h>
 #include <exchange/exchange_interface.h>
 #include <exchange/types.h>
+#include <risk/risk_manager.h>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -16,6 +17,9 @@ SameExchangeSpotPerpStrategy::SameExchangeSpotPerpStrategy(std::shared_ptr<Excha
     std::stringstream ss;
     ss << "Initialized with exchange: " << exchange_->getName();
     std::cout << ss.str() << std::endl;
+    
+    // We won't initialize the risk manager here since it's a forward declaration
+    // The risk manager will be set by the strategy factory
 }
 
 std::set<std::string> SameExchangeSpotPerpStrategy::getSymbols() const {
@@ -43,151 +47,258 @@ std::set<std::string> SameExchangeSpotPerpStrategy::getSymbols() const {
     return symbols;
 }
 
+std::string SameExchangeSpotPerpStrategy::getName() const {
+    return "SameExchangeSpotPerpStrategy (" + exchange_->getName() + ")";
+}
+
 std::vector<ArbitrageOpportunity> SameExchangeSpotPerpStrategy::findOpportunities() {
     std::vector<ArbitrageOpportunity> opportunities;
     
     try {
-        // Get all available perpetual futures
-        auto perp_instruments = exchange_->getAvailableInstruments(MarketType::PERPETUAL);
-        if (perp_instruments.empty()) {
+        // Get all available perpetual instruments
+        std::cout << "Getting perpetual instruments from " << exchange_->getName() << std::endl;
+        std::vector<Instrument> perp_instruments;
+        try {
+            perp_instruments = exchange_->getAvailableInstruments(MarketType::PERPETUAL);
+            if (perp_instruments.empty()) {
+                std::cout << "No perpetual instruments found on " << exchange_->getName() << std::endl;
+                return opportunities;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching perpetual instruments from " << exchange_->getName() 
+                      << ": " << e.what() << std::endl;
             return opportunities;
         }
+        std::cout << "Found " << perp_instruments.size() << " perpetual instruments on " 
+                  << exchange_->getName() << std::endl;
 
         // Get all available spot instruments
-        auto spot_instruments = exchange_->getAvailableInstruments(MarketType::SPOT);
-        if (spot_instruments.empty()) {
+        std::cout << "Getting spot instruments from " << exchange_->getName() << std::endl;
+        std::vector<Instrument> spot_instruments;
+        try {
+            spot_instruments = exchange_->getAvailableInstruments(MarketType::SPOT);
+            if (spot_instruments.empty()) {
+                std::cout << "No spot instruments found on " << exchange_->getName() << std::endl;
+                return opportunities;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error fetching spot instruments from " << exchange_->getName() 
+                      << ": " << e.what() << std::endl;
             return opportunities;
         }
+        std::cout << "Found " << spot_instruments.size() << " spot instruments on " 
+                  << exchange_->getName() << std::endl;
         
         // Find matching pairs and evaluate funding rates
         for (const auto& perp : perp_instruments) {
-            // Find matching spot instrument with same base currency
-            auto spot_it = std::find_if(spot_instruments.begin(), spot_instruments.end(),
-                [&perp](const Instrument& spot) {
-                    return spot.base_currency == perp.base_currency;
-                });
-            
-            if (spot_it == spot_instruments.end()) {
-                continue; // No matching spot instrument found
-            }
-            
-            // Get funding rate for the perpetual
-            FundingRate funding = exchange_->getFundingRate(perp.symbol);
-            
-            // Skip if funding rate is too small to be profitable
-            if (std::abs(funding.rate) < 0.0001) { // 0.01% threshold - configurable
+            // Skip instruments with empty base or quote currency
+            if (perp.base_currency.empty() || perp.quote_currency.empty()) {
+                std::cout << "Skipping perpetual instrument with empty base or quote currency: " 
+                          << perp.symbol << std::endl;
                 continue;
             }
             
-            // Get prices and calculate spread
-            double spot_price = exchange_->getPrice(spot_it->symbol);
-            double perp_price = exchange_->getPrice(perp.symbol);
-            double price_spread_pct = (perp_price - spot_price) / spot_price * 100.0;
+            // Find matching spot instrument
+            std::string spot_symbol_prefix = perp.base_currency + "/" + perp.quote_currency;
             
-            // Calculate annualized funding rate
-            double hours_per_year = 24.0 * 365.0;
-            double payments_per_year = hours_per_year / funding.payment_interval.count();
-            double annualized_rate = funding.rate * payments_per_year * 100.0; // Convert to percentage
-            
-            // Calculate max allowable spread before it negates funding
-            double max_spread = std::abs(annualized_rate) * 0.75; // 75% of funding rate
-            
-            // Get transaction fees for both spot and perp
-            double spot_taker_fee = exchange_->getTradingFee(spot_it->symbol, false);
-            double perp_taker_fee = exchange_->getTradingFee(perp.symbol, false);
-            
-            // Calculate total transaction cost for the complete arbitrage (entry + exit)
-            double total_transaction_cost_pct = (spot_taker_fee + perp_taker_fee) * 2 * 100.0; // as percentage
-            
-            // Create trading pair
-            TradingPair pair(exchange_->getName(), 
-                           spot_it->symbol, 
-                           MarketType::SPOT,
-                           exchange_->getName(),
-                           perp.symbol,
-                           MarketType::PERPETUAL);
-            
-            // Skip if price spread is too large relative to funding
-            if (std::abs(price_spread_pct) > max_spread) {
-                continue;
-            }
-            
-            // Calculate breakeven periods
-            double periods_to_breakeven = total_transaction_cost_pct / std::abs(funding.rate * 100.0);
-            
-            // Get order book depth for liquidity assessment
-            OrderBook spot_book = exchange_->getOrderBook(spot_it->symbol, 20);
-            OrderBook perp_book = exchange_->getOrderBook(perp.symbol, 20);
-            
-            // Determine max position size based on liquidity
-            double spot_liquidity = 0.0;
-            double perp_liquidity = 0.0;
-            
-            if (funding.rate > 0) {
-                // We'll go long spot, short perp - need sell liquidity for spot, buy for perp
-                for (const auto& level : spot_book.asks) {
-                    spot_liquidity += level.amount * level.price;
+            // Find all spot instruments that match the base/quote pair
+            for (const auto& spot : spot_instruments) {
+                // Skip if spot instrument doesn't match the perpetual's base/quote
+                if (spot.symbol.find(spot_symbol_prefix) != 0) {
+                    continue;
                 }
                 
-                for (const auto& level : perp_book.bids) {
-                    perp_liquidity += level.amount * level.price;
-                }
-            } else {
-                // We'll go short spot, long perp - need buy liquidity for spot, sell for perp
-                for (const auto& level : spot_book.bids) {
-                    spot_liquidity += level.amount * level.price;
-                }
-                
-                for (const auto& level : perp_book.asks) {
-                    perp_liquidity += level.amount * level.price;
+                try {
+                    // Get funding rate for the perpetual
+                    FundingRate funding;
+                    try {
+                        funding = exchange_->getFundingRate(perp.symbol);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching funding rate for " << perp.symbol 
+                                  << ": " << e.what() << std::endl;
+                        continue;
+                    }
+                    
+                    // Skip if funding rate is too small
+                    if (std::abs(funding.rate) < min_funding_rate_) {
+                        continue;
+                    }
+                    
+                    // Calculate annualized funding rate
+                    double hours_per_year = 24.0 * 365.0;
+                    double payments_per_year = hours_per_year / funding.payment_interval.count();
+                    double annualized_rate = funding.rate * payments_per_year * 100.0;
+                    
+                    std::cout << "Annualized funding rate for " << perp.symbol << ": " 
+                              << annualized_rate << "%" << std::endl;
+                    
+                    // Get current prices
+                    double spot_price = 0.0;
+                    double perp_price = 0.0;
+                    
+                    try {
+                        spot_price = exchange_->getPrice(spot.symbol);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching price for " << spot.symbol 
+                                  << ": " << e.what() << std::endl;
+                        continue;
+                    }
+                    
+                    try {
+                        perp_price = exchange_->getPrice(perp.symbol);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching price for " << perp.symbol 
+                                  << ": " << e.what() << std::endl;
+                        continue;
+                    }
+                    
+                    // Skip if either price is invalid
+                    if (spot_price <= 0.0 || perp_price <= 0.0) {
+                        std::cerr << "Invalid prices for " << spot.symbol << " (" << spot_price 
+                                  << ") or " << perp.symbol << " (" << perp_price << ")" << std::endl;
+                        continue;
+                    }
+                    
+                    // Calculate price spread as a percentage
+                    double price_spread_pct = (perp_price - spot_price) / spot_price * 100.0;
+                    
+                    std::cout << "Price spread for " << spot.symbol << " vs " << perp.symbol 
+                              << ": " << price_spread_pct << "%" << std::endl;
+                    
+                    // Get trading fees
+                    double spot_taker_fee = 0.0;
+                    double perp_taker_fee = 0.0;
+                    
+                    try {
+                        spot_taker_fee = exchange_->getTradingFee(spot.symbol, false);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching trading fee for " << spot.symbol 
+                                  << ": " << e.what() << std::endl;
+                        // Use default fee as fallback
+                        spot_taker_fee = 0.001;
+                    }
+                    
+                    try {
+                        perp_taker_fee = exchange_->getTradingFee(perp.symbol, false);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error fetching trading fee for " << perp.symbol 
+                                  << ": " << e.what() << std::endl;
+                        // Use default fee as fallback
+                        perp_taker_fee = 0.001;
+                    }
+                    
+                    // Calculate transaction costs (entry + exit)
+                    double transaction_cost = (spot_taker_fee + perp_taker_fee) * 2 * 100.0;
+                    
+                    // Calculate estimated profit (annualized funding rate minus transaction costs)
+                    double estimated_profit = std::abs(annualized_rate) - transaction_cost;
+                    
+                    // Skip if estimated profit is below threshold
+                    if (estimated_profit < min_expected_profit_) {
+                        continue;
+                    }
+                    
+                    // Calculate maximum allowable spread based on funding rate
+                    double max_allowable_spread = std::abs(annualized_rate) * 0.1; // 10% of annualized rate
+                    
+                    // Skip if current spread is too wide
+                    if (std::abs(price_spread_pct) > max_allowable_spread) {
+                        std::cout << "Spread too wide for " << spot.symbol << " vs " << perp.symbol 
+                                  << ": " << price_spread_pct << "% > " << max_allowable_spread << "%" << std::endl;
+                        continue;
+                    }
+                    
+                    // Calculate liquidity risk
+                    double liquidity_risk = 0.0;
+                    try {
+                        OrderBook spot_book = exchange_->getOrderBook(spot.symbol, 5);
+                        OrderBook perp_book = exchange_->getOrderBook(perp.symbol, 5);
+                        
+                        // Calculate average bid-ask spread as a percentage
+                        double spot_spread = (spot_book.asks[0].price - spot_book.bids[0].price) / spot_book.bids[0].price;
+                        double perp_spread = (perp_book.asks[0].price - perp_book.bids[0].price) / perp_book.bids[0].price;
+                        
+                        // Calculate total available liquidity
+                        double spot_liquidity = 0.0;
+                        double perp_liquidity = 0.0;
+                        
+                        for (const auto& level : spot_book.bids) {
+                            spot_liquidity += level.amount * level.price;
+                        }
+                        
+                        for (const auto& level : perp_book.bids) {
+                            perp_liquidity += level.amount * level.price;
+                        }
+                        
+                        // Higher spread and lower liquidity = higher risk
+                        liquidity_risk = (spot_spread + perp_spread) * 5000.0 + 
+                                        (1000000.0 / (spot_liquidity + 1.0)) + 
+                                        (1000000.0 / (perp_liquidity + 1.0));
+                        
+                        // Cap liquidity risk at 50
+                        liquidity_risk = std::min(50.0, liquidity_risk);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error calculating liquidity risk: " << e.what() << std::endl;
+                        liquidity_risk = 25.0; // Default to medium risk if calculation fails
+                    }
+                    
+                    // Create opportunity object
+                    ArbitrageOpportunity opportunity;
+                    opportunity.pair.exchange1 = exchange_->getName();
+                    opportunity.pair.symbol1 = spot.symbol;
+                    opportunity.pair.market_type1 = MarketType::SPOT;
+                    opportunity.pair.exchange2 = exchange_->getName();
+                    opportunity.pair.symbol2 = perp.symbol;
+                    opportunity.pair.market_type2 = MarketType::PERPETUAL;
+                    opportunity.funding_rate1 = 0.0; // Spot doesn't pay funding
+                    opportunity.funding_rate2 = funding.rate;
+                    opportunity.net_funding_rate = annualized_rate;
+                    opportunity.payment_interval1 = std::chrono::hours(0);
+                    opportunity.payment_interval2 = funding.payment_interval;
+                    opportunity.entry_price_spread = price_spread_pct;
+                    opportunity.max_allowable_spread = max_allowable_spread;
+                    opportunity.transaction_cost_pct = transaction_cost;
+                    opportunity.estimated_profit = estimated_profit;
+                    opportunity.periods_to_breakeven = transaction_cost / std::abs(funding.rate * 100.0);
+                    opportunity.discovery_time = std::chrono::system_clock::now();
+                    opportunity.strategy_type = "SameExchangeSpotPerpStrategy";
+                    opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
+                    
+                    // Calculate position risk score (0-100, higher = riskier)
+                    double funding_risk = 10.0 * (1.0 - std::min(1.0, std::abs(funding.rate) / 0.01));
+                    double spread_risk = 20.0 * (std::abs(price_spread_pct) / max_allowable_spread);
+                    double exchange_risk = 10.0; // Base risk for any exchange
+                    
+                    opportunity.position_risk_score = std::min(100.0, spread_risk + liquidity_risk + exchange_risk + funding_risk);
+                    
+                    // Calculate maximum position size based on risk
+                    double risk_factor = 1.0 - (opportunity.position_risk_score / 200.0); // 0.5 to 1.0
+                    opportunity.max_position_size = 5000.0 * risk_factor; // Use a default max position size
+                    
+                    // Add to opportunities
+                    opportunities.push_back(opportunity);
+                    
+                    std::cout << "Found opportunity: " << spot.symbol << " vs " << perp.symbol 
+                              << " | Funding rate: " << (funding.rate * 100.0) << "%" 
+                              << " | Est. profit: " << estimated_profit << "%" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "Error processing pair " << spot.symbol << " / " << perp.symbol 
+                              << ": " << e.what() << std::endl;
                 }
             }
-            
-            // Take the smaller of the two liquidities and apply a conservative factor
-            double max_position_size = std::min(spot_liquidity, perp_liquidity) * 0.1; // Use at most 10% of available liquidity
-            
-            // Calculate estimated profit
-            double estimated_profit = std::abs(annualized_rate) - total_transaction_cost_pct;
-            
-            // Skip if not profitable
-            if (estimated_profit <= 0) {
-                continue;
-            }
-            
-            // Create opportunity
-            ArbitrageOpportunity opportunity;
-            opportunity.pair = pair;
-            opportunity.funding_rate1 = 0.0; // No funding for spot
-            opportunity.funding_rate2 = funding.rate;
-            opportunity.net_funding_rate = annualized_rate;
-            opportunity.payment_interval1 = std::chrono::hours(0);
-            opportunity.payment_interval2 = funding.payment_interval;
-            opportunity.entry_price_spread = price_spread_pct;
-            opportunity.max_allowable_spread = max_spread;
-            opportunity.transaction_cost_pct = total_transaction_cost_pct;
-            opportunity.estimated_profit = estimated_profit;
-            opportunity.periods_to_breakeven = periods_to_breakeven;
-            opportunity.max_position_size = max_position_size;
-            opportunity.position_risk_score = calculateRiskScore(opportunity);
-            opportunity.discovery_time = std::chrono::system_clock::now();
-            
-            // Set the strategy type
-            opportunity.strategy_type = "SameExchangeSpotPerpStrategy";
-            opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
-            
-            opportunities.push_back(opportunity);
         }
+        
+        // Sort opportunities by estimated profit
+        std::sort(opportunities.begin(), opportunities.end(),
+                 [](const ArbitrageOpportunity& a, const ArbitrageOpportunity& b) {
+                     return a.estimated_profit > b.estimated_profit;
+                 });
+        
+        std::cout << "Found " << opportunities.size() << " viable opportunities" << std::endl;
+        
     } catch (const std::exception& e) {
-        std::stringstream ss;
-        ss << "Error finding opportunities: " << e.what();
-        std::cerr << ss.str() << std::endl;
+        std::cerr << "Error in SameExchangeSpotPerpStrategy::findOpportunities: " << e.what() << std::endl;
     }
-    
-    // Sort by estimated profit (descending)
-    std::sort(opportunities.begin(), opportunities.end(),
-              [](const ArbitrageOpportunity& a, const ArbitrageOpportunity& b) {
-                  return a.estimated_profit > b.estimated_profit;
-              });
     
     return opportunities;
 }

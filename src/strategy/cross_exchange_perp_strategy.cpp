@@ -87,309 +87,293 @@ std::set<std::string> CrossExchangePerpStrategy::getSymbols() const {
     std::set<std::string> symbols;
     
     try {
-        // Get all available perpetual futures from both exchanges
         auto perp_instruments1 = exchange1_->getAvailableInstruments(MarketType::PERPETUAL);
         auto perp_instruments2 = exchange2_->getAvailableInstruments(MarketType::PERPETUAL);
         
-        // Add symbols from both exchanges
-        for (const auto& instrument : perp_instruments1) {
-            symbols.insert(instrument.symbol);
-        }
-        for (const auto& instrument : perp_instruments2) {
-            symbols.insert(instrument.symbol);
+        for (const auto& perp : perp_instruments1) {
+            symbols.insert(perp.symbol);
         }
         
+        for (const auto& perp : perp_instruments2) {
+            symbols.insert(perp.symbol);
+        }
     } catch (const std::exception& e) {
-        logMessage("CrossExchangePerpStrategy", 
-                  "Error getting available symbols: " + std::string(e.what()), true);
+        std::cerr << "Error getting symbols: " << e.what() << std::endl;
     }
     
     return symbols;
+}
+
+std::string CrossExchangePerpStrategy::getName() const {
+    return "CrossExchangePerpStrategy (" + exchange1_->getName() + " & " + exchange2_->getName() + ")";
 }
 
 std::vector<ArbitrageOpportunity> CrossExchangePerpStrategy::findOpportunities() {
     std::vector<ArbitrageOpportunity> opportunities;
     
     try {
+        logMessage("CrossExchangePerpStrategy", "Starting for exchanges: " 
+                  + exchange1_->getName() + " and " + exchange2_->getName());
+        
         // Get all available perpetual futures from both exchanges with retry logic
-        auto perp_instruments1 = retryApiCall("Get instruments from " + exchange1_->getName(),
-            [this]() { return exchange1_->getAvailableInstruments(MarketType::PERPETUAL); });
+        logMessage("CrossExchangePerpStrategy", "Getting perpetual instruments from " + exchange1_->getName());
+        std::vector<Instrument> perp_instruments1;
+        try {
+            perp_instruments1 = retryApiCall("Get instruments from " + exchange1_->getName(),
+                [this]() { return exchange1_->getAvailableInstruments(MarketType::PERPETUAL); });
             
-        auto perp_instruments2 = retryApiCall("Get instruments from " + exchange2_->getName(),
-            [this]() { return exchange2_->getAvailableInstruments(MarketType::PERPETUAL); });
+            if (perp_instruments1.empty()) {
+                logMessage("CrossExchangePerpStrategy", "No perpetual instruments found on " + 
+                          exchange1_->getName(), true);
+                return opportunities;
+            }
+        } catch (const std::exception& e) {
+            logMessage("CrossExchangePerpStrategy", 
+                     "Error fetching perpetual instruments from " + exchange1_->getName() + 
+                     ": " + std::string(e.what()), true);
+            return opportunities;
+        }
         
-        logMessage("CrossExchangePerpStrategy", "Found " + std::to_string(perp_instruments1.size()) + 
-                  " perpetuals on " + exchange1_->getName() + " and " + 
-                  std::to_string(perp_instruments2.size()) + " on " + exchange2_->getName());
+        logMessage("CrossExchangePerpStrategy", "Getting perpetual instruments from " + exchange2_->getName());
+        std::vector<Instrument> perp_instruments2;
+        try {
+            perp_instruments2 = retryApiCall("Get instruments from " + exchange2_->getName(),
+                [this]() { return exchange2_->getAvailableInstruments(MarketType::PERPETUAL); });
+            
+            if (perp_instruments2.empty()) {
+                logMessage("CrossExchangePerpStrategy", "No perpetual instruments found on " + 
+                          exchange2_->getName(), true);
+                return opportunities;
+            }
+        } catch (const std::exception& e) {
+            logMessage("CrossExchangePerpStrategy", 
+                     "Error fetching perpetual instruments from " + exchange2_->getName() + 
+                     ": " + std::string(e.what()), true);
+            return opportunities;
+        }
         
-        // Find matching symbols across exchanges
+        // Process each perpetual instrument from the first exchange
         for (const auto& perp1 : perp_instruments1) {
-            // Find matching instrument on exchange2
-            auto perp2_it = std::find_if(perp_instruments2.begin(), perp_instruments2.end(),
-                [&perp1](const Instrument& perp2) {
-                    return perp2.base_currency == perp1.base_currency && 
-                           perp2.quote_currency == perp1.quote_currency;
-                });
-            
-            if (perp2_it == perp_instruments2.end()) {
-                continue; // No matching instrument found on exchange2
-            }
-            
-            // Get funding rates for both perpetuals with retry logic
-            FundingRate funding1 = retryApiCall("Get funding rate for " + perp1.symbol,
-                [this, &perp1]() { return exchange1_->getFundingRate(perp1.symbol); });
+            try {
+                // Skip instruments with empty or invalid base/quote currencies
+                if (perp1.base_currency.empty() || perp1.quote_currency.empty()) {
+                    logMessage("CrossExchangePerpStrategy", 
+                             "Skipping instrument with empty base/quote currency: " + perp1.symbol);
+                    continue;
+                }
                 
-            FundingRate funding2 = retryApiCall("Get funding rate for " + perp2_it->symbol,
-                [this, &perp2_it]() { return exchange2_->getFundingRate(perp2_it->symbol); });
-            
-            // Calculate funding rate differential
-            double funding_diff = funding1.rate - funding2.rate;
-            
-            // Skip if funding rate differential is too small
-            constexpr double MIN_FUNDING_DIFF = 0.0002; // 0.02% threshold - configurable
-            if (std::abs(funding_diff) < MIN_FUNDING_DIFF) {
-                continue;
-            }
-            
-            // Get prices and calculate spread with retry logic
-            double price1 = retryApiCall("Get price for " + perp1.symbol,
-                [this, &perp1]() { return exchange1_->getPrice(perp1.symbol); });
+                // Find matching instrument on the second exchange
+                auto perp2_it = std::find_if(perp_instruments2.begin(), perp_instruments2.end(),
+                    [&perp1](const Instrument& perp2) {
+                        return perp1.base_currency == perp2.base_currency && 
+                               perp1.quote_currency == perp2.quote_currency;
+                    });
                 
-            double price2 = retryApiCall("Get price for " + perp2_it->symbol,
-                [this, &perp2_it]() { return exchange2_->getPrice(perp2_it->symbol); });
+                if (perp2_it == perp_instruments2.end()) {
+                    // No matching instrument found
+                    continue;
+                }
                 
-            double price_spread_pct = (price1 - price2) / price2 * 100.0;
-            
-            // Create trading pair
-            TradingPair pair(exchange1_->getName(), 
-                           perp1.symbol, 
-                           MarketType::PERPETUAL,
-                           exchange2_->getName(),
-                           perp2_it->symbol,
-                           MarketType::PERPETUAL);
-            
-            // Calculate annualized funding rates for both exchanges
-            double hours_per_year = 24.0 * 365.0;
-            double payments_per_year1 = hours_per_year / funding1.payment_interval.count();
-            double payments_per_year2 = hours_per_year / funding2.payment_interval.count();
-            
-            double annualized_rate1 = funding1.rate * payments_per_year1 * 100.0;
-            double annualized_rate2 = funding2.rate * payments_per_year2 * 100.0;
-            double net_funding_rate = annualized_rate1 - annualized_rate2;
-            
-            // Get transaction fees for both exchanges with retry logic
-            double taker_fee1 = retryApiCall("Get trading fee for " + perp1.symbol,
-                [this, &perp1]() { return exchange1_->getTradingFee(perp1.symbol, false); });
-                
-            double taker_fee2 = retryApiCall("Get trading fee for " + perp2_it->symbol,
-                [this, &perp2_it]() { return exchange2_->getTradingFee(perp2_it->symbol, false); });
-            
-            // Calculate total transaction cost for the complete arbitrage (entry + exit)
-            // For each exchange: entry fee + exit fee (as percentage)
-            double total_transaction_cost_pct = (taker_fee1 * 2 + taker_fee2 * 2) * 100.0;
-            
-            // Calculate max allowable spread before it negates funding
-            // Use the more conservative payment frequency for calculations
-            double min_payments = std::min(payments_per_year1, payments_per_year2);
-            double max_spread = std::abs(net_funding_rate) / min_payments * 0.75;
-            
-            // Add slippage buffer to transaction costs based on market conditions
-            double slippage_buffer = PRICE_SLIPPAGE_BUFFER * 100.0; // Convert to percentage
-            total_transaction_cost_pct += slippage_buffer;
-            
-            // Build opportunity
-            ArbitrageOpportunity opportunity;
-            opportunity.pair = pair;
-            opportunity.funding_rate1 = funding1.rate;
-            opportunity.funding_rate2 = funding2.rate;
-            opportunity.net_funding_rate = net_funding_rate;
-            opportunity.payment_interval1 = funding1.payment_interval;
-            opportunity.payment_interval2 = funding2.payment_interval;
-            opportunity.entry_price_spread = price_spread_pct;
-            opportunity.max_allowable_spread = max_spread;
-            opportunity.transaction_cost_pct = total_transaction_cost_pct;
-            
-            // Preliminary profit estimate including transaction costs
-            // Expected funding profit - price spread cost - transaction costs
-            opportunity.estimated_profit = std::abs(net_funding_rate) - std::abs(price_spread_pct) - total_transaction_cost_pct;
-            
-            // Calculate the number of funding periods needed to break even on transaction costs
-            double funding_per_period = std::abs(funding_diff) * 100.0; // As percentage
-            opportunity.periods_to_breakeven = total_transaction_cost_pct / funding_per_period;
-            
-            // Get order books to estimate max position size with retry logic
-            OrderBook ob1 = retryApiCall("Get order book for " + perp1.symbol,
-                [this, &perp1]() { return exchange1_->getOrderBook(perp1.symbol, 10); });
-                
-            OrderBook ob2 = retryApiCall("Get order book for " + perp2_it->symbol,
-                [this, &perp2_it]() { return exchange2_->getOrderBook(perp2_it->symbol, 10); });
-            
-            double liquidity1 = 0.0;
-            double liquidity2 = 0.0;
-            
-            // Calculate available liquidity with market impact consideration
-            bool long_exchange1 = funding1.rate < funding2.rate;
-            
-            if (long_exchange1) {
-                // Market impact analysis - calculate effective price after slippage
-                double effective_price1 = 0.0;
-                double total_size1 = 0.0;
-                double target_value = 50000.0; // Target position value in USD
-                
-                for (const auto& level : ob1.asks) {
-                    double level_value = level.amount * level.price;
-                    if (total_size1 + level.amount < target_value / level.price) {
-                        // We can take the entire level
-                        liquidity1 += level_value;
-                        effective_price1 += level_value;
-                        total_size1 += level.amount;
-                    } else {
-                        // We need part of this level
-                        double needed_amount = (target_value / level.price) - total_size1;
-                        liquidity1 += needed_amount * level.price;
-                        effective_price1 += needed_amount * level.price;
-                        total_size1 += needed_amount;
-                        break;
+                // Get funding rates for both instruments
+                FundingRate funding1;
+                try {
+                    funding1 = retryApiCall("Get funding rate for " + perp1.symbol + " on " + exchange1_->getName(),
+                        [this, &perp1]() { return exchange1_->getFundingRate(perp1.symbol); });
+                    
+                    // Skip if funding rate is zero or invalid
+                    if (std::abs(funding1.rate) < 0.00001) {
+                        continue;
                     }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting funding rate for " + 
+                              perp1.symbol + " on " + exchange1_->getName() + ": " + 
+                              std::string(e.what()), true);
+                    continue;
                 }
                 
-                if (total_size1 > 0) {
-                    effective_price1 /= (total_size1 * price1); // Normalize to get price multiplier
-                } else {
-                    effective_price1 = 1.0; // No slippage if no size
-                }
-                
-                // Repeat for exchange 2
-                double effective_price2 = 0.0;
-                double total_size2 = 0.0;
-                
-                for (const auto& level : ob2.bids) {
-                    double level_value = level.amount * level.price;
-                    if (total_size2 + level.amount < target_value / level.price) {
-                        liquidity2 += level_value;
-                        effective_price2 += level_value;
-                        total_size2 += level.amount;
-                    } else {
-                        double needed_amount = (target_value / level.price) - total_size2;
-                        liquidity2 += needed_amount * level.price;
-                        effective_price2 += needed_amount * level.price;
-                        total_size2 += needed_amount;
-                        break;
+                FundingRate funding2;
+                try {
+                    funding2 = retryApiCall("Get funding rate for " + perp2_it->symbol + " on " + exchange2_->getName(),
+                        [this, &perp2_it]() { return exchange2_->getFundingRate(perp2_it->symbol); });
+                    
+                    // Skip if funding rate is zero or invalid
+                    if (std::abs(funding2.rate) < 0.00001) {
+                        continue;
                     }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting funding rate for " + 
+                              perp2_it->symbol + " on " + exchange2_->getName() + ": " + 
+                              std::string(e.what()), true);
+                    continue;
                 }
                 
-                if (total_size2 > 0) {
-                    effective_price2 /= (total_size2 * price2);
-                } else {
-                    effective_price2 = 1.0;
+                // Calculate funding rate difference
+                double funding_diff = funding1.rate - funding2.rate;
+                
+                // Skip if funding rate difference is too small
+                if (std::abs(funding_diff) < min_funding_rate_) {
+                    continue;
                 }
                 
-                // Calculate slippage as percentage of original price
-                double slippage1 = (effective_price1 - 1.0) * 100.0;
-                double slippage2 = (1.0 - effective_price2) * 100.0;
-                double total_slippage = slippage1 + slippage2;
-                
-                // Add slippage to transaction costs if it wasn't already accounted for
-                if (total_slippage > slippage_buffer) {
-                    opportunity.transaction_cost_pct += (total_slippage - slippage_buffer);
-                }
-            } else {
-                // Repeat market impact analysis for opposite direction
-                // Short on exchange 1, long on exchange 2
-                double effective_price1 = 0.0;
-                double total_size1 = 0.0;
-                double target_value = 50000.0;
-                
-                for (const auto& level : ob1.bids) {
-                    double level_value = level.amount * level.price;
-                    if (total_size1 + level.amount < target_value / level.price) {
-                        liquidity1 += level_value;
-                        effective_price1 += level_value;
-                        total_size1 += level.amount;
-                    } else {
-                        double needed_amount = (target_value / level.price) - total_size1;
-                        liquidity1 += needed_amount * level.price;
-                        effective_price1 += needed_amount * level.price;
-                        total_size1 += needed_amount;
-                        break;
+                // Get current prices
+                double price1 = 0.0;
+                try {
+                    price1 = retryApiCall("Get price for " + perp1.symbol + " on " + exchange1_->getName(),
+                        [this, &perp1]() { return exchange1_->getPrice(perp1.symbol); });
+                    
+                    if (price1 <= 0.0) {
+                        logMessage("CrossExchangePerpStrategy", "Invalid price for " + perp1.symbol + 
+                                  " on " + exchange1_->getName() + ": " + std::to_string(price1), true);
+                        continue;
                     }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting price for " + perp1.symbol + 
+                              " on " + exchange1_->getName() + ": " + std::string(e.what()), true);
+                    continue;
                 }
                 
-                if (total_size1 > 0) {
-                    effective_price1 /= (total_size1 * price1);
-                } else {
-                    effective_price1 = 1.0;
-                }
-                
-                double effective_price2 = 0.0;
-                double total_size2 = 0.0;
-                
-                for (const auto& level : ob2.asks) {
-                    double level_value = level.amount * level.price;
-                    if (total_size2 + level.amount < target_value / level.price) {
-                        liquidity2 += level_value;
-                        effective_price2 += level_value;
-                        total_size2 += level.amount;
-                    } else {
-                        double needed_amount = (target_value / level.price) - total_size2;
-                        liquidity2 += needed_amount * level.price;
-                        effective_price2 += needed_amount * level.price;
-                        total_size2 += needed_amount;
-                        break;
+                double price2 = 0.0;
+                try {
+                    price2 = retryApiCall("Get price for " + perp2_it->symbol + " on " + exchange2_->getName(),
+                        [this, &perp2_it]() { return exchange2_->getPrice(perp2_it->symbol); });
+                    
+                    if (price2 <= 0.0) {
+                        logMessage("CrossExchangePerpStrategy", "Invalid price for " + perp2_it->symbol + 
+                                  " on " + exchange2_->getName() + ": " + std::to_string(price2), true);
+                        continue;
                     }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting price for " + perp2_it->symbol + 
+                              " on " + exchange2_->getName() + ": " + std::string(e.what()), true);
+                    continue;
                 }
                 
-                if (total_size2 > 0) {
-                    effective_price2 /= (total_size2 * price2);
-                } else {
-                    effective_price2 = 1.0;
+                // Calculate price difference as percentage
+                double avg_price = (price1 + price2) / 2.0;
+                double price_diff_pct = (price1 - price2) / avg_price * 100.0;
+                
+                // Get trading fees
+                double fee1_maker = 0.0;
+                double fee1_taker = 0.0;
+                double fee2_maker = 0.0;
+                double fee2_taker = 0.0;
+                
+                try {
+                    fee1_maker = exchange1_->getTradingFee(perp1.symbol, true);
+                    fee1_taker = exchange1_->getTradingFee(perp1.symbol, false);
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting trading fees for " + 
+                              perp1.symbol + " on " + exchange1_->getName() + ": " + 
+                              std::string(e.what()), true);
+                    // Use default fees
+                    fee1_maker = 0.0002;
+                    fee1_taker = 0.0005;
                 }
                 
-                double slippage1 = (1.0 - effective_price1) * 100.0;
-                double slippage2 = (effective_price2 - 1.0) * 100.0;
-                double total_slippage = slippage1 + slippage2;
-                
-                if (total_slippage > slippage_buffer) {
-                    opportunity.transaction_cost_pct += (total_slippage - slippage_buffer);
+                try {
+                    fee2_maker = exchange2_->getTradingFee(perp2_it->symbol, true);
+                    fee2_taker = exchange2_->getTradingFee(perp2_it->symbol, false);
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting trading fees for " + 
+                              perp2_it->symbol + " on " + exchange2_->getName() + ": " + 
+                              std::string(e.what()), true);
+                    // Use default fees
+                    fee2_maker = 0.0002;
+                    fee2_taker = 0.0005;
                 }
-            }
-            
-            // Use smaller of the two for max position size and consider market impact
-            double max_liquidity = std::min(liquidity1, liquidity2);
-            opportunity.max_position_size = max_liquidity * 0.25; // 25% of available liquidity
-            
-            // Calculate a risk score that considers market conditions
-            double spread_risk = std::abs(price_spread_pct / max_spread) * 40.0; // 40% of score
-            double liquidity_risk = (1.0 - max_liquidity / 50000.0) * 30.0; // 30% of score
-            
-            // Dynamic exchange risk based on historical reliability
-            double exchange1_risk = calculateExchangeRisk(exchange1_->getName());
-            double exchange2_risk = calculateExchangeRisk(exchange2_->getName());
-            double exchange_risk = (exchange1_risk + exchange2_risk) / 2.0;
-            
-            // Funding payment mismatch risk
-            double payment_mismatch_risk = 0.0;
-            if (funding1.payment_interval != funding2.payment_interval) {
-                payment_mismatch_risk = 10.0; // Additional risk for mismatched payment intervals
-            }
-            
-            double funding_risk = 10.0 + payment_mismatch_risk; // Base risk + mismatch risk
-            
-            opportunity.position_risk_score = std::min(100.0, spread_risk + liquidity_risk + exchange_risk + funding_risk);
-            
-            // Record discovery time
-            opportunity.discovery_time = std::chrono::system_clock::now();
-            
-            // Set the strategy type
-            opportunity.strategy_type = "CrossExchangePerpStrategy";
-            opportunity.strategy_index = -1; // Will be set by CompositeStrategy if used
-            
-            // Add to opportunities if estimated profit is positive AFTER transaction costs
-            // and the risk score is acceptable
-            if (opportunity.estimated_profit > 0 && opportunity.position_risk_score < 75.0) {
+                
+                // Calculate total transaction cost (entry + exit)
+                double transaction_cost_pct = (fee1_taker + fee2_taker) * 2 * 100.0;
+                
+                // Calculate annualized funding rate
+                double hours_per_year = 24.0 * 365.0;
+                double payments_per_year1 = hours_per_year / funding1.payment_interval.count();
+                double payments_per_year2 = hours_per_year / funding2.payment_interval.count();
+                double annualized_funding_diff = funding_diff * std::min(payments_per_year1, payments_per_year2) * 100.0;
+                
+                // Calculate estimated profit (annualized)
+                double estimated_profit = std::abs(annualized_funding_diff) - transaction_cost_pct;
+                
+                // Skip if estimated profit is too low
+                if (estimated_profit < min_expected_profit_) {
+                    continue;
+                }
+                
+                // Calculate maximum allowable spread based on funding rate difference
+                double max_allowable_spread = std::abs(annualized_funding_diff) * 0.1;
+                
+                // Skip if current spread is too wide
+                if (std::abs(price_diff_pct) > max_allowable_spread) {
+                    continue;
+                }
+                
+                // Calculate periods to breakeven
+                double periods_to_breakeven = transaction_cost_pct / std::abs(funding_diff * 100.0);
+                
+                // Get order book to estimate liquidity
+                double liquidity1 = 50000.0; // Default value
+                double liquidity2 = 50000.0; // Default value
+                
+                try {
+                    auto ob1 = exchange1_->getOrderBook(perp1.symbol, 5);
+                    liquidity1 = 0.0;
+                    for (const auto& level : ob1.bids) {
+                        liquidity1 += level.amount * level.price;
+                    }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting order book for " + 
+                              perp1.symbol + " on " + exchange1_->getName() + ": " + 
+                              std::string(e.what()), true);
+                }
+                
+                try {
+                    auto ob2 = exchange2_->getOrderBook(perp2_it->symbol, 5);
+                    liquidity2 = 0.0;
+                    for (const auto& level : ob2.bids) {
+                        liquidity2 += level.amount * level.price;
+                    }
+                } catch (const std::exception& e) {
+                    logMessage("CrossExchangePerpStrategy", "Error getting order book for " + 
+                              perp2_it->symbol + " on " + exchange2_->getName() + ": " + 
+                              std::string(e.what()), true);
+                }
+                
+                // Create opportunity object
+                ArbitrageOpportunity opportunity;
+                opportunity.pair.exchange1 = exchange1_->getName();
+                opportunity.pair.symbol1 = perp1.symbol;
+                opportunity.pair.market_type1 = MarketType::PERPETUAL;
+                opportunity.pair.exchange2 = exchange2_->getName();
+                opportunity.pair.symbol2 = perp2_it->symbol;
+                opportunity.pair.market_type2 = MarketType::PERPETUAL;
+                opportunity.funding_rate1 = funding1.rate;
+                opportunity.funding_rate2 = funding2.rate;
+                opportunity.net_funding_rate = funding_diff;
+                opportunity.payment_interval1 = funding1.payment_interval;
+                opportunity.payment_interval2 = funding2.payment_interval;
+                opportunity.entry_price_spread = price_diff_pct;
+                opportunity.max_allowable_spread = max_allowable_spread;
+                opportunity.transaction_cost_pct = transaction_cost_pct;
+                opportunity.estimated_profit = estimated_profit;
+                opportunity.periods_to_breakeven = periods_to_breakeven;
+                opportunity.max_position_size = std::min(liquidity1, liquidity2) * 0.1; // 10% of available liquidity
+                
+                // Calculate risk score
+                double exchange1_risk = calculateExchangeRisk(exchange1_->getName());
+                double exchange2_risk = calculateExchangeRisk(exchange2_->getName());
+                double exchange_risk = (exchange1_risk + exchange2_risk) / 2.0;
+                double liquidity_risk = (1.0 - std::min(liquidity1, liquidity2) / 50000.0) * 30.0;
+                double funding_risk = std::min(30.0, std::abs(funding_diff) * 1000.0);
+                double position_risk_score = std::min(100.0, exchange_risk + liquidity_risk + funding_risk);
+                
+                opportunity.position_risk_score = position_risk_score;
+                opportunity.discovery_time = std::chrono::system_clock::now();
+                opportunity.strategy_type = "CrossExchangePerpStrategy";
+                
+                // Add to opportunities list
                 opportunities.push_back(opportunity);
                 
-                // Log identified opportunity
+                // Log opportunity details
                 std::stringstream ss;
                 ss << "Found opportunity: " << perp1.symbol << " on " << exchange1_->getName()
                    << " vs " << perp2_it->symbol << " on " << exchange2_->getName()
@@ -397,6 +381,9 @@ std::vector<ArbitrageOpportunity> CrossExchangePerpStrategy::findOpportunities()
                    << " | Est. profit: " << opportunity.estimated_profit << "%"
                    << " | Risk score: " << opportunity.position_risk_score;
                 logMessage("CrossExchangePerpStrategy", ss.str());
+            } catch (const std::exception& e) {
+                logMessage("CrossExchangePerpStrategy", 
+                         "Error processing opportunity: " + std::string(e.what()), true);
             }
         }
     } catch (const std::exception& e) {

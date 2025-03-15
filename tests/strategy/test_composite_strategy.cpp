@@ -4,6 +4,7 @@
 #include <exchange/types.h>
 #include "../exchange/mock_exchange.h"
 #include <memory>
+#include <set>
 
 namespace funding {
 namespace testing {
@@ -59,6 +60,13 @@ public:
     
     void monitorPositions() override {
         monitor_called_ = true;
+    }
+    
+    std::set<std::string> getSymbols() const override {
+        std::set<std::string> symbols;
+        symbols.insert("BTC/USDT");
+        symbols.insert("ETH/USDT");
+        return symbols;
     }
     
     // Helper methods for testing

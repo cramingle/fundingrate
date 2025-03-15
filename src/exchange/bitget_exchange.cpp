@@ -365,15 +365,8 @@ public:
                     std::cout << "No funding rate found for " << modified_symbol << ", using default 0.0" << std::endl;
                 }
                 
-                // Set next funding time (Bitget has 8-hour funding intervals)
-                // Since we don't have the exact next funding time from this endpoint,
-                // we'll estimate it based on the current time
-                auto now = std::chrono::system_clock::now();
-                auto hours_since_epoch = std::chrono::duration_cast<std::chrono::hours>(now.time_since_epoch()).count();
-                int hours_until_next = (8 - (hours_since_epoch % 8)) % 8;
-                if (hours_until_next == 0) hours_until_next = 8; // If we're exactly at a funding time
-                
-                funding.next_payment = now + std::chrono::hours(hours_until_next);
+                // Calculate next funding time based on Bitget's schedule
+                funding.next_payment = calculateNextFundingTime();
                 
                 // Use current rate as predicted rate
                 funding.predicted_rate = funding.rate;
@@ -395,10 +388,55 @@ public:
             funding.rate = 0.0;
             funding.predicted_rate = 0.0;
             funding.payment_interval = std::chrono::hours(8);
-            funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+            funding.next_payment = calculateNextFundingTime();
         }
         
         return funding;
+    }
+    
+    // Calculate the next funding time based on Bitget's funding schedule (00:00, 08:00, 16:00 UTC)
+    std::chrono::system_clock::time_point calculateNextFundingTime() {
+        // Bitget funding times occur at 00:00, 08:00, and 16:00 UTC
+        auto now = std::chrono::system_clock::now();
+        
+        // Convert to time_t for easier date/time manipulation
+        std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm* now_tm = std::gmtime(&now_time_t);
+        
+        // Get current hour in UTC
+        int current_hour = now_tm->tm_hour;
+        
+        // Calculate hours until next funding time
+        int hours_until_next;
+        
+        if (current_hour < 8) {
+            // Next funding is at 08:00 UTC
+            hours_until_next = 8 - current_hour;
+        } else if (current_hour < 16) {
+            // Next funding is at 16:00 UTC
+            hours_until_next = 16 - current_hour;
+        } else {
+            // Next funding is at 00:00 UTC tomorrow
+            hours_until_next = 24 - current_hour;
+        }
+        
+        // Reset minutes, seconds, and microseconds for exact hour
+        now_tm->tm_min = 0;
+        now_tm->tm_sec = 0;
+        
+        // Add hours until next funding time
+        now_tm->tm_hour += hours_until_next;
+        
+        // Convert back to time_t
+        std::time_t next_funding_time_t = std::mktime(now_tm);
+        
+        // Convert to UTC (mktime assumes local time)
+        // For simplicity, we'll adjust based on the difference between local and UTC
+        std::time_t utc_offset = std::mktime(std::gmtime(&now_time_t)) - now_time_t;
+        next_funding_time_t -= utc_offset;
+        
+        // Convert back to system_clock::time_point
+        return std::chrono::system_clock::from_time_t(next_funding_time_t);
     }
     
     // Fee information

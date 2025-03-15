@@ -3,10 +3,14 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <set>
 #include <exchange/types.h>
 #include <exchange/exchange_interface.h>
 
 namespace funding {
+
+// Forward declarations
+class RiskManager;
 
 // Base class for all funding rate arbitrage strategies
 class ArbitrageStrategy {
@@ -34,6 +38,9 @@ public:
     // Get available symbols for this strategy
     virtual std::set<std::string> getSymbols() const = 0;
     
+    // Get the name of the strategy
+    virtual std::string getName() const { return "ArbitrageStrategy"; }
+    
     // Configuration methods
     virtual void setMinFundingRate(double rate) { min_funding_rate_ = rate; }
     virtual void setMinExpectedProfit(double profit) { min_expected_profit_ = profit; }
@@ -57,9 +64,11 @@ public:
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
     std::set<std::string> getSymbols() const override;
+    std::string getName() const override;
 
 private:
     std::shared_ptr<ExchangeInterface> exchange_;
+    std::shared_ptr<RiskManager> risk_manager_;
     
     /**
      * Calculate a risk score for the opportunity based on various factors.
@@ -82,6 +91,7 @@ public:
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
     std::set<std::string> getSymbols() const override;
+    std::string getName() const override;
 
 private:
     // Calculate exchange risk based on historical reliability
@@ -115,6 +125,7 @@ public:
     bool closePosition(const ArbitrageOpportunity& opportunity) override;
     void monitorPositions() override;
     std::set<std::string> getSymbols() const override;
+    std::string getName() const override;
 
 private:
     std::shared_ptr<ExchangeInterface> spot_exchange_;

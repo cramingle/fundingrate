@@ -299,11 +299,18 @@ void FundingBot::mainLoop() {
             
             // Check if it's time to scan for opportunities
             if (now - last_scan_time >= std::chrono::seconds(scan_interval_seconds)) {
-                // Scan for new opportunities
-                scanForOpportunities();
+                log("Starting scan for opportunities...");
                 
-                // Update last scan time
-                last_scan_time = now;
+                try {
+                    // Scan for new opportunities
+                    scanForOpportunities();
+                    
+                    // Update last scan time
+                    last_scan_time = now;
+                    log("Scan completed successfully");
+                } catch (const std::exception& e) {
+                    log("Error during opportunity scan: " + std::string(e.what()), true);
+                }
             }
             
             // Sleep for a short time to avoid excessive CPU usage
@@ -315,6 +322,9 @@ void FundingBot::mainLoop() {
             log("Error in main loop: " + std::string(e.what()), true);
             
             // Sleep for a while before retrying to avoid rapid error loops
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        } catch (...) {
+            log("Unknown error in main loop", true);
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
     }
@@ -376,51 +386,138 @@ void FundingBot::monitorLoop() {
 
 // Scan for arbitrage opportunities
 void FundingBot::scanForOpportunities() {
-    log("Scanning for arbitrage opportunities...");
-    
-    int total_opportunities = 0;
-    int valid_opportunities = 0;
-    int executed_opportunities = 0;
-    
     try {
+        log("Starting opportunity scan...");
+        
+        int total_opportunities = 0;
+        int valid_opportunities = 0;
+        int executed_opportunities = 0;
+        
         // Scan each strategy for opportunities
-        for (const auto& strategy : strategies_) {
-            // Find opportunities
-            auto opportunities = strategy->findOpportunities();
-            total_opportunities += opportunities.size();
+        for (size_t i = 0; i < strategies_.size(); i++) {
+            log("Scanning strategy " + std::to_string(i+1) + " of " + std::to_string(strategies_.size()) + 
+                " (" + strategies_[i]->getName() + ")");
             
-            // Log the number of opportunities found
-            if (!opportunities.empty()) {
-                log("Found " + std::to_string(opportunities.size()) + 
-                    " potential opportunities");
-            }
-            
-            // Process each opportunity
-            for (const auto& opportunity : opportunities) {
-                // Validate opportunity with risk manager
-                if (risk_manager_->canEnterPosition(opportunity)) {
-                    valid_opportunities++;
-                    
-                    // Process the opportunity
-                    if (processOpportunity(opportunity)) {
-                        executed_opportunities++;
+            try {
+                // Find opportunities
+                log("Calling findOpportunities() for strategy " + std::to_string(i+1));
+                auto opportunities = strategies_[i]->findOpportunities();
+                total_opportunities += opportunities.size();
+                
+                // Log the number of opportunities found
+                if (!opportunities.empty()) {
+                    log("Found " + std::to_string(opportunities.size()) + 
+                        " potential opportunities in strategy " + std::to_string(i+1));
+                } else {
+                    log("No opportunities found in strategy " + std::to_string(i+1));
+                    continue; // Skip to next strategy if no opportunities found
+                }
+                
+                // Process each opportunity
+                log("Processing " + std::to_string(opportunities.size()) + " opportunities from strategy " + std::to_string(i+1));
+                for (const auto& opportunity : opportunities) {
+                    try {
+                        // Validate opportunity fields before processing
+                        if (opportunity.pair.symbol1.empty() || opportunity.pair.symbol2.empty() ||
+                            opportunity.pair.exchange1.empty() || opportunity.pair.exchange2.empty()) {
+                            log("Skipping opportunity with empty symbol or exchange fields", true);
+                            continue;
+                        }
+                        
+                        log("Validating opportunity: " + opportunity.pair.symbol1 + " on " + 
+                            opportunity.pair.exchange1 + " <-> " + opportunity.pair.symbol2 + 
+                            " on " + opportunity.pair.exchange2);
+                        
+                        // Validate the opportunity
+                        if (strategies_[i]->validateOpportunity(opportunity)) {
+                            valid_opportunities++;
+                            
+                            // Check if we should execute this trade
+                            if (config_manager_->getBotConfig().simulation_mode == false) {
+                                log("Auto-trade enabled, checking if we should execute this opportunity");
+                                
+                                // Check if we're already in a similar position
+                                bool already_in_position = false;
+                                auto active_positions = risk_manager_->getActivePositions();
+                                for (const auto& pos : active_positions) {
+                                    if (pos.opportunity.pair.symbol1 == opportunity.pair.symbol1 && 
+                                        pos.opportunity.pair.symbol2 == opportunity.pair.symbol2 &&
+                                        pos.opportunity.pair.exchange1 == opportunity.pair.exchange1 && 
+                                        pos.opportunity.pair.exchange2 == opportunity.pair.exchange2) {
+                                        already_in_position = true;
+                                        log("Already in position for this opportunity, skipping");
+                                        break;
+                                    }
+                                }
+                                
+                                if (!already_in_position) {
+                                    log("No existing position, proceeding with opportunity");
+                                    
+                                    // Calculate position size
+                                    double position_size = strategies_[i]->calculateOptimalPositionSize(opportunity);
+                                    
+                                    // Apply risk management
+                                    position_size = risk_manager_->calculatePositionSize(opportunity);
+                                    
+                                    log("Calculated position size: " + formatCurrency(position_size, 2) + " USD");
+                                    
+                                    // Execute the trade if position size is valid
+                                    if (position_size > 0) {
+                                        log("Executing trade with position size: " + formatCurrency(position_size, 2) + " USD");
+                                        
+                                        if (processOpportunity(opportunity)) {
+                                            executed_opportunities++;
+                                            
+                                            // Add to active positions
+                                            ArbitragePosition position;
+                                            position.opportunity = opportunity;
+                                            position.position_size = position_size;
+                                            position.entry_time = std::chrono::system_clock::now();
+                                            position.position_id = opportunity.pair.exchange1 + "_" + 
+                                                                  opportunity.pair.symbol1 + "_" + 
+                                                                  opportunity.pair.exchange2 + "_" + 
+                                                                  opportunity.pair.symbol2;
+                                            position.is_active = true;
+                                            risk_manager_->registerPosition(position);
+                                            log("Trade executed successfully, added to active positions");
+                                        } else {
+                                            log("Failed to execute trade", true);
+                                        }
+                                    } else {
+                                        log("Position size too small, skipping execution");
+                                    }
+                                }
+                            } else {
+                                log("Auto-trade disabled, skipping execution");
+                            }
+                        } else {
+                            log("Opportunity failed validation, skipping");
+                        }
+                    } catch (const std::exception& e) {
+                        log("Error processing opportunity: " + std::string(e.what()), true);
+                    } catch (...) {
+                        log("Unknown error processing opportunity", true);
                     }
                 }
+            } catch (const std::exception& e) {
+                log("Error scanning strategy " + std::to_string(i+1) + ": " + std::string(e.what()), true);
+            } catch (...) {
+                log("Unknown error scanning strategy " + std::to_string(i+1), true);
             }
         }
         
-        // Log summary
         if (total_opportunities > 0) {
             log("Opportunity scan complete: " + 
                 std::to_string(total_opportunities) + " total, " +
                 std::to_string(valid_opportunities) + " valid, " +
                 std::to_string(executed_opportunities) + " executed");
         } else {
-            log("No arbitrage opportunities found in this scan");
+            log("Opportunity scan complete: No opportunities found");
         }
-        
     } catch (const std::exception& e) {
-        log("Error scanning for opportunities: " + std::string(e.what()), true);
+        log("Error in scanForOpportunities: " + std::string(e.what()), true);
+    } catch (...) {
+        log("Unknown error in scanForOpportunities", true);
     }
 }
 
@@ -1189,32 +1286,39 @@ void FundingBot::setupWebSocketClient() {
 
 // Subscribe to symbols
 void FundingBot::subscribeToSymbols() {
-    try {
-        if (!websocket_client_) return;
+    std::set<std::string> symbols;
+    
+    // Collect symbols from all strategies
+    for (const auto& strategy : strategies_) {
+        auto strategy_symbols = strategy->getSymbols();
+        symbols.insert(strategy_symbols.begin(), strategy_symbols.end());
+    }
+    
+    log("Subscribing to " + std::to_string(symbols.size()) + " symbols for real-time price updates");
+    
+    // Convert to vector for WebSocket client
+    std::vector<std::string> symbol_streams;
+    for (const auto& symbol : symbols) {
+        // Format symbol for Binance WebSocket (lowercase and @ticker suffix)
+        std::string formatted_symbol = symbol;
         
-        // Get all symbols from strategies
-        std::set<std::string> symbols;
-        for (const auto& strategy : strategies_) {
-            const auto& strategy_symbols = strategy->getSymbols();
-            symbols.insert(strategy_symbols.begin(), strategy_symbols.end());
-        }
+        // Convert to lowercase
+        std::transform(formatted_symbol.begin(), formatted_symbol.end(), 
+                      formatted_symbol.begin(), ::tolower);
         
-        // Convert symbols to Binance stream format
-        std::vector<std::string> streams;
-        for (const auto& symbol : symbols) {
-            // Convert to lowercase and add @ticker suffix
-            std::string stream = symbol;
-            std::transform(stream.begin(), stream.end(), stream.begin(), ::tolower);
-            streams.push_back(stream + "@ticker");
-        }
-        
-        // Update WebSocket client streams
-        websocket_client_ = std::make_unique<WebSocketClient>(
-            "wss://stream.binance.com:9443/stream", streams);
-        
-        log("Subscribed to " + std::to_string(streams.size()) + " symbol streams");
-    } catch (const std::exception& e) {
-        log("Error subscribing to symbols: " + std::string(e.what()), true);
+        // Remove any / or - and replace with nothing
+        formatted_symbol.erase(
+            std::remove_if(formatted_symbol.begin(), formatted_symbol.end(), 
+                          [](char c) { return c == '/' || c == '-'; }),
+            formatted_symbol.end());
+            
+        // Add @ticker suffix for Binance ticker stream
+        symbol_streams.push_back(formatted_symbol + "@ticker");
+    }
+    
+    // Subscribe to the streams
+    if (websocket_client_ && !symbol_streams.empty()) {
+        websocket_client_->subscribeToStreams(symbol_streams);
     }
 }
 

@@ -3,7 +3,7 @@
 # Usage: ./run [config_file] [--test-api-only]
 
 # Set default config file path
-CONFIG_FILE="config/bot_config.json"
+CONFIG_FILE="../config/bot_config.json"
 TEST_API_ONLY=false
 
 # Colors for output
@@ -382,7 +382,20 @@ format_output() {
     done
 }
 
-# Run the application with the specified config file and format output
+# Run the bot
+echo -e "\n${BOLD}${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${NC}"
+echo -e "${BOLD}${BLUE}┃       ${GREEN}Funding Rate Arbitrage Bot Running       ${BLUE}┃${NC}"
+echo -e "${BOLD}${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${NC}"
+echo -e "${YELLOW}→ Using config file: ${CONFIG_FILE}${NC}"
+
+# Check if config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}✖ Config file not found: ${CONFIG_FILE}${NC}"
+fi
+
+echo -e "${YELLOW}→ Press Ctrl+C to stop the application${NC}\n"
+
+# Run the bot with the specified config file
 ./funding_bot -c "$CONFIG_FILE" 2>&1 | format_output
 
 # Return to original directory

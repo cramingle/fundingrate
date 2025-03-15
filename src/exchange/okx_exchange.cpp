@@ -201,6 +201,9 @@ public:
         funding.symbol = symbol;
         
         try {
+            // Store original base URL to restore it in case of error
+            std::string original_base_url = base_url_;
+            
             // Convert symbol format if needed (e.g., BTCUSDT to BTC-USDT-SWAP)
             std::string okx_symbol = symbol;
             if (symbol.find("-") == std::string::npos) {
@@ -219,48 +222,136 @@ public:
             // Endpoint for getting funding rate information
             std::string endpoint = "/api/v5/public/funding-rate?instId=" + okx_symbol;
             
-            // Make API call
-            json response = makeApiCall(endpoint);
-            
-            // Parse response
-            if (response["code"] == "0" && response.contains("data") && !response["data"].empty()) {
-                auto& data = response["data"][0];
+            // Make API call with error handling
+            json response;
+            try {
+                response = makeApiCall(endpoint);
+            } catch (const std::exception& e) {
+                std::cerr << "Error making API call for funding rate: " << e.what() << std::endl;
                 
-                // Parse current funding rate
-                if (data.contains("fundingRate")) {
-                    funding.rate = std::stod(data["fundingRate"].get<std::string>());
-                } else {
-                    funding.rate = 0.0;
-                }
+                // Restore original base URL if it was changed
+                base_url_ = original_base_url;
                 
-                // Parse next funding time
-                if (data.contains("nextFundingTime")) {
-                    std::string time_str = data["nextFundingTime"].get<std::string>();
-                    // Convert timestamp in milliseconds to time_point
-                    int64_t next_time_ms = std::stoll(time_str);
-                    funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
-                } else {
-                    // Default to 8 hours from now
-                    funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
-                }
-                
-                // OKX has 8-hour funding intervals
+                // Set default values on error
+                funding.rate = 0.0;
+                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
                 funding.payment_interval = std::chrono::hours(8);
-                
-                // Use nextFundingRate if available, otherwise use current rate
-                if (data.contains("nextFundingRate") && !data["nextFundingRate"].get<std::string>().empty()) {
-                    funding.predicted_rate = std::stod(data["nextFundingRate"].get<std::string>());
-                } else {
-                    funding.predicted_rate = funding.rate;
-                }
-            } else {
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Check if response is empty or null
+            if (response.is_null() || response.empty()) {
+                std::cerr << "Empty or null response for funding rate" << std::endl;
+                funding.rate = 0.0;
+                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Check for error messages in the response
+            if (response.contains("code") && response["code"] != "0") {
                 std::string error_msg = "Failed to get funding rate: ";
                 if (response.contains("msg")) {
                     error_msg += response["msg"].get<std::string>();
                 } else {
-                    error_msg += "Unknown error";
+                    error_msg += "Error code " + response["code"].get<std::string>();
                 }
-                throw std::runtime_error(error_msg);
+                std::cerr << error_msg << std::endl;
+                
+                // Set default values on error
+                funding.rate = 0.0;
+                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Check if data field exists and is not empty
+            if (!response.contains("data") || !response["data"].is_array() || response["data"].empty()) {
+                std::cerr << "Response does not contain valid data array for funding rate" << std::endl;
+                funding.rate = 0.0;
+                funding.next_payment = std::chrono::system_clock::now() + std::chrono::hours(8);
+                funding.payment_interval = std::chrono::hours(8);
+                funding.predicted_rate = 0.0;
+                return funding;
+            }
+            
+            // Safely access the first data element
+            auto& data = response["data"][0];
+            
+            // Parse current funding rate with type checking
+            if (data.contains("fundingRate")) {
+                if (data["fundingRate"].is_string()) {
+                    try {
+                        funding.rate = std::stod(data["fundingRate"].get<std::string>());
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error parsing fundingRate: " << e.what() << std::endl;
+                        funding.rate = 0.0;
+                    }
+                } else if (data["fundingRate"].is_number()) {
+                    funding.rate = data["fundingRate"].get<double>();
+                } else {
+                    std::cerr << "fundingRate is neither a string nor a number" << std::endl;
+                    funding.rate = 0.0;
+                }
+            } else {
+                std::cerr << "fundingRate field not found" << std::endl;
+                funding.rate = 0.0;
+            }
+            
+            // Parse next funding time with type checking
+            if (data.contains("nextFundingTime")) {
+                if (data["nextFundingTime"].is_string()) {
+                    try {
+                        std::string time_str = data["nextFundingTime"].get<std::string>();
+                        int64_t next_time_ms = std::stoll(time_str);
+                        funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error parsing nextFundingTime: " << e.what() << std::endl;
+                        // Calculate next funding time based on OKX's schedule (00:00, 08:00, 16:00 UTC)
+                        funding.next_payment = calculateNextFundingTime();
+                    }
+                } else if (data["nextFundingTime"].is_number()) {
+                    int64_t next_time_ms = data["nextFundingTime"].get<int64_t>();
+                    funding.next_payment = std::chrono::system_clock::from_time_t(next_time_ms / 1000);
+                } else {
+                    std::cerr << "nextFundingTime is neither a string nor a number" << std::endl;
+                    // Calculate next funding time based on OKX's schedule (00:00, 08:00, 16:00 UTC)
+                    funding.next_payment = calculateNextFundingTime();
+                }
+            } else {
+                std::cerr << "nextFundingTime field not found" << std::endl;
+                // Calculate next funding time based on OKX's schedule (00:00, 08:00, 16:00 UTC)
+                funding.next_payment = calculateNextFundingTime();
+            }
+            
+            // OKX has 8-hour funding intervals
+            funding.payment_interval = std::chrono::hours(8);
+            
+            // Parse predicted funding rate with type checking
+            if (data.contains("nextFundingRate")) {
+                if (data["nextFundingRate"].is_string()) {
+                    if (!data["nextFundingRate"].get<std::string>().empty()) {
+                        try {
+                            funding.predicted_rate = std::stod(data["nextFundingRate"].get<std::string>());
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error parsing nextFundingRate: " << e.what() << std::endl;
+                            funding.predicted_rate = funding.rate;
+                        }
+                    } else {
+                        funding.predicted_rate = funding.rate;
+                    }
+                } else if (data["nextFundingRate"].is_number()) {
+                    funding.predicted_rate = data["nextFundingRate"].get<double>();
+                } else {
+                    std::cerr << "nextFundingRate is neither a string nor a number" << std::endl;
+                    funding.predicted_rate = funding.rate;
+                }
+            } else {
+                std::cerr << "nextFundingRate field not found" << std::endl;
+                funding.predicted_rate = funding.rate;
             }
         } catch (const std::exception& e) {
             std::cerr << "Error fetching funding rate for " << symbol << ": " << e.what() << std::endl;
@@ -797,6 +888,50 @@ private:
             fee_structure_.fee_tier = 0;
             fee_structure_.tier_name = "Regular";
         }
+    }
+
+    std::chrono::system_clock::time_point calculateNextFundingTime() {
+        // OKX funding times occur at 00:00, 08:00, and 16:00 UTC
+        auto now = std::chrono::system_clock::now();
+        
+        // Convert to time_t for easier date/time manipulation
+        std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm* now_tm = std::gmtime(&now_time_t);
+        
+        // Get current hour in UTC
+        int current_hour = now_tm->tm_hour;
+        
+        // Calculate hours until next funding time
+        int hours_until_next;
+        
+        if (current_hour < 8) {
+            // Next funding is at 08:00 UTC
+            hours_until_next = 8 - current_hour;
+        } else if (current_hour < 16) {
+            // Next funding is at 16:00 UTC
+            hours_until_next = 16 - current_hour;
+        } else {
+            // Next funding is at 00:00 UTC tomorrow
+            hours_until_next = 24 - current_hour;
+        }
+        
+        // Reset minutes, seconds, and microseconds for exact hour
+        now_tm->tm_min = 0;
+        now_tm->tm_sec = 0;
+        
+        // Add hours until next funding time
+        now_tm->tm_hour += hours_until_next;
+        
+        // Convert back to time_t
+        std::time_t next_funding_time_t = std::mktime(now_tm);
+        
+        // Convert to UTC (mktime assumes local time)
+        // For simplicity, we'll adjust based on the difference between local and UTC
+        std::time_t utc_offset = std::mktime(std::gmtime(&now_time_t)) - now_time_t;
+        next_funding_time_t -= utc_offset;
+        
+        // Convert back to system_clock::time_point
+        return std::chrono::system_clock::from_time_t(next_funding_time_t);
     }
 };
 

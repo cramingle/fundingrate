@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <string>
 #include <typeinfo>
+#include <set>
 
 namespace funding {
 
@@ -191,6 +192,28 @@ public:
         for (const auto& strategy : strategies_) {
             strategy->setMinExpectedProfit(profit);
         }
+    }
+    
+    std::set<std::string> getSymbols() const override {
+        std::set<std::string> all_symbols;
+        
+        // Collect symbols from all sub-strategies
+        for (const auto& strategy : strategies_) {
+            auto symbols = strategy->getSymbols();
+            all_symbols.insert(symbols.begin(), symbols.end());
+        }
+        
+        return all_symbols;
+    }
+    
+    std::string getName() const override {
+        std::string name = "CompositeStrategy (";
+        for (size_t i = 0; i < strategies_.size(); ++i) {
+            if (i > 0) name += ", ";
+            name += strategies_[i]->getName();
+        }
+        name += ")";
+        return name;
     }
     
 private:
